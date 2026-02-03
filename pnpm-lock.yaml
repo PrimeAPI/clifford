@@ -204,12 +204,9 @@ importers:
       '@clifford/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
-      '@clifford/skill-example':
+      '@clifford/tools':
         specifier: workspace:*
-        version: link:../../packages/skill-example
-      '@clifford/tools-core':
-        specifier: workspace:*
-        version: link:../../packages/tools-core
+        version: link:../../packages/tools
       bullmq:
         specifier: ^5.32.2
         version: 5.67.2
@@ -284,20 +281,7 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
-  packages/skill-example:
-    dependencies:
-      '@clifford/sdk':
-        specifier: workspace:*
-        version: link:../sdk
-      zod:
-        specifier: ^3.24.1
-        version: 3.25.76
-    devDependencies:
-      typescript:
-        specifier: ^5.7.2
-        version: 5.9.3
-
-  packages/tools-core:
+  packages/tools:
     dependencies:
       '@clifford/db':
         specifier: workspace:*

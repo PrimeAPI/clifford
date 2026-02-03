@@ -1,5 +1,6 @@
 import type { Job } from 'bullmq';
 import type { RunJob, Logger, ToolCall } from '@clifford/sdk';
+import { parseToolCommandName } from '@clifford/sdk';
 import { getDb, runs, runSteps, agentPlugins } from '@clifford/db';
 import { eq, and } from 'drizzle-orm';
 import { PolicyEngine } from '@clifford/policy';
@@ -114,10 +115,27 @@ async function processToolCall(toolCall: ToolCall, ctx: ToolCallContext) {
     idempotencyKey: callStepKey,
   });
 
+  const parsedName = parseToolCommandName(toolCall.name);
+  if (!parsedName) {
+    logger.error('Invalid tool name', { toolName: toolCall.name });
+    await db.insert(runSteps).values({
+      runId,
+      seq: stepSeq + 1,
+      type: 'tool_result',
+      toolName: toolCall.name,
+      resultJson: { success: false, error: 'Invalid tool name' },
+      status: 'failed',
+      idempotencyKey: `${runId}:result:${toolCall.id}`,
+    });
+    return;
+  }
+
+  const { toolName, commandName } = parsedName;
+
   // Get tool definition
-  const toolDef = toolRegistry.getTool(toolCall.name);
+  const toolDef = toolRegistry.getTool(toolName);
   if (!toolDef) {
-    logger.error('Tool not found', { toolName: toolCall.name });
+    logger.error('Tool not found', { toolName });
     await db.insert(runSteps).values({
       runId,
       seq: stepSeq + 1,
@@ -130,9 +148,31 @@ async function processToolCall(toolCall: ToolCall, ctx: ToolCallContext) {
     return;
   }
 
+  const commandDef = toolRegistry.getCommand(toolName, commandName);
+  if (!commandDef) {
+    logger.error('Tool command not found', { toolName, commandName });
+    await db.insert(runSteps).values({
+      runId,
+      seq: stepSeq + 1,
+      type: 'tool_result',
+      toolName: toolCall.name,
+      resultJson: { success: false, error: 'Tool command not found' },
+      status: 'failed',
+      idempotencyKey: `${runId}:result:${toolCall.id}`,
+    });
+    return;
+  }
+
   // Check policy
   const decision = await policyEngine.decideToolCall(
-    { tenantId, agentId, toolName: toolCall.name, args: toolCall.args, policyProfile: 'default' },
+    {
+      tenantId,
+      agentId,
+      toolName,
+      commandName,
+      args: toolCall.args,
+      policyProfile: 'default',
+    },
     toolDef
   );
 
@@ -152,7 +192,7 @@ async function processToolCall(toolCall: ToolCall, ctx: ToolCallContext) {
 
   // Execute tool
   try {
-    const result = await toolDef.handler(
+    const result = await commandDef.handler(
       { tenantId, agentId, runId, db, logger },
       toolCall.args
     );

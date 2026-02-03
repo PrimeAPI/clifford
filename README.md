@@ -23,8 +23,7 @@ Autonomous agent platform built with TypeScript, Node.js, and modern web technol
 - **sdk** - Shared types and contracts
 - **policy** - Policy engine (allow/deny/confirm decisions)
 - **db** - Database client and schema (Drizzle ORM)
-- **tools-core** - Built-in tools (system.ping, memory.put/get)
-- **skill-example** - Example plugin demonstrating plugin interface
+- **tools** - Built-in tools (system.ping, memory.put/get)
 
 ## Quick Start
 
@@ -133,8 +132,7 @@ clifford/
 │   ├── sdk/              # Shared types
 │   ├── policy/           # Policy engine
 │   ├── db/               # Database client
-│   ├── tools-core/       # Built-in tools
-│   └── skill-example/    # Example plugin
+│   └── tools/            # Built-in tools
 ├── docker-compose.yml    # Infrastructure
 ├── package.json          # Root config
 ├── pnpm-workspace.yaml   # Workspace config
@@ -155,13 +153,11 @@ clifford/
 
 ### Adding a New Tool
 
-1. Create a new file in `packages/tools-core/src/`
+1. Create a new file in `packages/tools/src/`
 2. Define the tool using the `ToolDef` interface
-3. Export it from `packages/tools-core/src/index.ts`
+3. Export it from `packages/tools/src/index.ts`
 
 ### Creating a Plugin
-
-See `packages/skill-example` for a complete example.
 
 1. Create a new package
 2. Implement the `Plugin` interface from `@clifford/sdk`

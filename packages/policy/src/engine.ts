@@ -4,11 +4,6 @@ export interface PolicyEngineOptions {
   profile?: string;
 }
 
-// Tool categories for policy decisions
-const READ_TOOLS = ['system.ping', 'memory.get'];
-const WRITE_TOOLS = ['memory.put'];
-const DESTRUCTIVE_TOOLS: string[] = [];
-
 export class PolicyEngine {
   private _profile: string;
 
@@ -21,26 +16,26 @@ export class PolicyEngine {
    */
   async decideToolCall(
     ctx: PolicyContext,
-    _toolDef: ToolDef,
+    toolDef: ToolDef,
     _budgetState?: BudgetState
   ): Promise<PolicyDecision> {
-    const { toolName } = ctx;
-
-    // Default policy logic
-    if (READ_TOOLS.includes(toolName)) {
-      return 'allow';
-    }
-
-    if (WRITE_TOOLS.includes(toolName)) {
+    const command = toolDef.commands.find((entry) => entry.name === ctx.commandName);
+    if (!command) {
       return 'confirm';
     }
 
-    if (DESTRUCTIVE_TOOLS.includes(toolName)) {
-      return 'deny';
+    switch (command.classification) {
+      case 'READ':
+        return 'allow';
+      case 'WRITE':
+        return 'confirm';
+      case 'DESTRUCT':
+        return 'deny';
+      case 'SENSITIVE':
+        return 'confirm';
+      default:
+        return 'confirm';
     }
-
-    // Default: unknown tools require confirmation
-    return 'confirm';
   }
 
   /**

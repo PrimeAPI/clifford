@@ -22,21 +22,6 @@ export async function llmStub(inputText: string): Promise<LLMResponse> {
     };
   }
 
-  const helloMatch = lower.match(/hello\s+(\w+)/);
-  if (helloMatch) {
-    const name = helloMatch[1];
-    return {
-      type: 'tool_calls',
-      toolCalls: [
-        {
-          id: nanoid(),
-          name: 'example.hello',
-          args: { name },
-        },
-      ],
-    };
-  }
-
   // Default: text response
   return {
     type: 'message',

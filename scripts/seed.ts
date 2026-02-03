@@ -24,13 +24,6 @@ async function seed() {
     ON CONFLICT (id) DO NOTHING
   `);
 
-  // Add example plugin to agent
-  await db.execute(`
-    INSERT INTO agent_plugins (agent_id, plugin_name, plugin_version, enabled)
-    VALUES ('${agentId}', '@clifford/skill-example', '0.1.0', true)
-    ON CONFLICT (agent_id, plugin_name) DO NOTHING
-  `);
-
   console.log('Seed completed!');
   console.log('Tenant ID:', tenantId);
   console.log('Agent ID:', agentId);

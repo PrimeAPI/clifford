@@ -1,14 +1,27 @@
 import { z } from 'zod';
 
 // Tool Definition
-export interface ToolDef {
+export type CommandClassification = 'READ' | 'WRITE' | 'DESTRUCT' | 'SENSITIVE';
+
+export interface ToolCommandDef {
   name: string;
-  description: string;
+  shortDescription: string;
+  longDescription: string;
+  usageExample: string;
   argsSchema: z.ZodSchema;
-  handler: ToolHandler;
+  classification: CommandClassification;
+  handler: ToolCommandHandler;
 }
 
-export type ToolHandler = (ctx: ToolContext, args: unknown) => Promise<unknown>;
+export interface ToolDef {
+  name: string;
+  shortDescription: string;
+  longDescription: string;
+  completeRequirement?: string;
+  commands: ToolCommandDef[];
+}
+
+export type ToolCommandHandler = (ctx: ToolContext, args: unknown) => Promise<unknown>;
 
 export interface ToolContext {
   tenantId: string;
@@ -58,6 +71,7 @@ export interface PolicyContext {
   tenantId: string;
   agentId: string;
   toolName: string;
+  commandName: string;
   args: Record<string, unknown>;
   policyProfile: string;
 }
@@ -88,4 +102,57 @@ export interface RunStep {
   status: StepStatus;
   idempotencyKey: string;
   createdAt: Date;
+}
+
+export function parseToolCommandName(
+  fullName: string
+): { toolName: string; commandName: string } | null {
+  const splitIndex = fullName.indexOf('.');
+  if (splitIndex <= 0 || splitIndex === fullName.length - 1) {
+    return null;
+  }
+
+  return {
+    toolName: fullName.slice(0, splitIndex),
+    commandName: fullName.slice(splitIndex + 1),
+  };
+}
+
+export function formatToolCommandName(toolName: string, commandName: string): string {
+  return `${toolName}.${commandName}`;
+}
+
+export function getToolCommandNames(tool: ToolDef): string[] {
+  return tool.commands.map((command) => command.name);
+}
+
+export function describeToolSummary(tool: ToolDef): string {
+  const commandLines = tool.commands.map(
+    (command) => `- ${command.name}: ${command.shortDescription}`
+  );
+
+  return [`${tool.name}: ${tool.shortDescription}`, 'Commands:', ...commandLines].join('\n');
+}
+
+export function describeToolDetails(tool: ToolDef): string {
+  const commandBlocks = tool.commands.map((command) =>
+    [
+      `Command: ${command.name}`,
+      `Summary: ${command.shortDescription}`,
+      `Details: ${command.longDescription}`,
+      `Usage: ${command.usageExample}`,
+      `Classification: ${command.classification}`,
+    ].join('\n')
+  );
+
+  return [
+    `Tool: ${tool.name}`,
+    `Summary: ${tool.shortDescription}`,
+    `Details: ${tool.longDescription}`,
+    tool.completeRequirement ? `Complete Requirement: ${tool.completeRequirement}` : null,
+    'Commands:',
+    ...commandBlocks,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join('\n');
 }

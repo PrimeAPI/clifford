@@ -70,7 +70,7 @@ export default function HomePage() {
               <Rocket className="mb-4 h-10 w-10 text-primary" />
               <h3 className="mb-2 text-xl font-semibold">Plugin System</h3>
               <p className="text-muted-foreground">
-                Extend capabilities with custom tools and skills. Build once, reuse everywhere.
+                Extend capabilities with custom tools and plugins. Build once, reuse everywhere.
               </p>
             </div>
 
