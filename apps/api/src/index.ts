@@ -4,6 +4,9 @@ import { config } from './config.js';
 import { healthRoutes } from './routes/health.js';
 import { runRoutes } from './routes/runs.js';
 import { eventRoutes } from './routes/events.js';
+import { channelRoutes } from './routes/channels.js';
+import { messageRoutes } from './routes/messages.js';
+import { discordRoutes } from './routes/discord.js';
 
 const app = Fastify({
   logger: {
@@ -15,6 +18,9 @@ await app.register(cors);
 await app.register(healthRoutes);
 await app.register(runRoutes);
 await app.register(eventRoutes);
+await app.register(channelRoutes);
+await app.register(messageRoutes);
+await app.register(discordRoutes);
 
 const start = async () => {
   try {

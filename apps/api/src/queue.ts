@@ -6,7 +6,7 @@ const connection = {
   url: config.redisUrl,
 };
 
-export const runQueue = new Queue<RunJob>('clifford:runs', { connection });
+export const runQueue = new Queue<RunJob>('clifford-runs', { connection });
 
 export async function enqueueRun(job: RunJob) {
   await runQueue.add('run', job, {

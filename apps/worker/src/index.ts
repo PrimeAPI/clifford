@@ -11,7 +11,7 @@ const connection = {
 };
 
 const worker = new Worker<RunJob>(
-  'clifford:runs',
+  'clifford-runs',
   async (job) => {
     await processRun(job, logger);
   },
@@ -31,7 +31,7 @@ worker.on('failed', (job, err) => {
 
 logger.info(
   { concurrency: config.workerConcurrency },
-  'Worker started, listening for jobs on clifford:runs'
+  'Worker started, listening for jobs on clifford-runs'
 );
 
 // Graceful shutdown

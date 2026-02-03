@@ -8,13 +8,14 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "dev": "turbo run dev",
+    "dev": "turbo run dev --concurrency=15",
     "build": "turbo run build",
     "lint": "turbo run lint",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
     "db:generate": "pnpm --filter @clifford/db db:generate",
     "db:migrate": "pnpm --filter @clifford/db db:migrate",
+    "db:seed": "npx tsx scripts/seed-channels.ts",
     "clean": "turbo run clean && rm -rf node_modules .turbo"
   },
   "devDependencies": {

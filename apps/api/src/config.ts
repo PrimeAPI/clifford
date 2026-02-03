@@ -1,9 +1,14 @@
 import { config as loadEnv } from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
 
-loadEnv();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+loadEnv({ path: resolve(__dirname, '../../../.env') });
 
 export const config = {
-  port: parseInt(process.env.API_PORT || '3000', 10),
+  port: parseInt(process.env.API_PORT || '3001', 10),
   host: process.env.API_HOST || '0.0.0.0',
   databaseUrl: process.env.DATABASE_URL || '',
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',

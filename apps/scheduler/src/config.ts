@@ -1,6 +1,11 @@
 import { config as loadEnv } from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
 
-loadEnv();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+loadEnv({ path: resolve(__dirname, '../../../.env') });
 
 export const config = {
   databaseUrl: process.env.DATABASE_URL || '',

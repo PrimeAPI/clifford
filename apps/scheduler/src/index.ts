@@ -11,7 +11,7 @@ const connection = {
   url: config.redisUrl,
 };
 
-const wakeQueue = new Queue<WakeJob>('clifford:wake', { connection });
+const wakeQueue = new Queue<WakeJob>('clifford-wake', { connection });
 
 async function tick() {
   const db = getDb();

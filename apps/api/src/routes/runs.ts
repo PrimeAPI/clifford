@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { getDb, runs, runSteps } from '@clifford/db';
 import { eq, desc } from 'drizzle-orm';
-import { nanoid } from 'nanoid';
+import { randomUUID } from 'crypto';
 import { enqueueRun } from '../queue.js';
 
 const createRunSchema = z.object({
@@ -21,7 +21,7 @@ export async function runRoutes(app: FastifyInstance) {
     const body = createRunSchema.parse(req.body);
     const db = getDb();
 
-    const runId = nanoid();
+    const runId = randomUUID();
     await db.insert(runs).values({
       id: runId,
       tenantId,

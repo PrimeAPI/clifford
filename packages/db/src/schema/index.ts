@@ -11,3 +11,6 @@ export * from './accounts';
 export * from './sessions';
 export * from './verification-tokens';
 export * from './user-settings';
+export * from './channels';
+export * from './messages';
+export * from './discord-connections';
