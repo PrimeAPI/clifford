@@ -19,10 +19,21 @@ const renderJobList = (title: string, jobs: QueueJob[]) => (
             {job.failedReason ? (
               <p className="text-xs text-destructive">Error: {job.failedReason}</p>
             ) : null}
+            {job.result ? (
+              <div className="space-y-1">
+                <p className="text-[11px] uppercase text-muted-foreground">Response</p>
+                <pre className="whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
+                  {JSON.stringify(job.result, null, 2)}
+                </pre>
+              </div>
+            ) : null}
             {job.data ? (
-              <pre className="whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
-                {JSON.stringify(job.data, null, 2)}
-              </pre>
+              <div className="space-y-1">
+                <p className="text-[11px] uppercase text-muted-foreground">Input</p>
+                <pre className="whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
+                  {JSON.stringify(job.data, null, 2)}
+                </pre>
+              </div>
             ) : null}
           </div>
         ))}
@@ -78,6 +89,13 @@ export default function QueueTasksPage() {
               <p>Completed: {queueStatus?.queues.deliveries.counts.completed ?? 0}</p>
               <p>Failed: {queueStatus?.queues.deliveries.counts.failed ?? 0}</p>
             </div>
+            <div className="space-y-2">
+              <p className="font-medium">Memory Write Queue</p>
+              <p>Active: {queueStatus?.queues.memoryWrites.counts.active ?? 0}</p>
+              <p>Waiting: {queueStatus?.queues.memoryWrites.counts.waiting ?? 0}</p>
+              <p>Completed: {queueStatus?.queues.memoryWrites.counts.completed ?? 0}</p>
+              <p>Failed: {queueStatus?.queues.memoryWrites.counts.failed ?? 0}</p>
+            </div>
           </div>
           {renderJobList('Active Message Jobs', queueStatus?.queues.messages.active ?? [])}
           {renderJobList('Waiting Message Jobs', queueStatus?.queues.messages.waiting ?? [])}
@@ -91,6 +109,10 @@ export default function QueueTasksPage() {
           {renderJobList('Waiting Run Jobs', queueStatus?.queues.runs.waiting ?? [])}
           {renderJobList('Failed Run Jobs', queueStatus?.queues.runs.failed ?? [])}
           {renderJobList('Completed Run Jobs', queueStatus?.queues.runs.completed ?? [])}
+          {renderJobList('Active Memory Jobs', queueStatus?.queues.memoryWrites.active ?? [])}
+          {renderJobList('Waiting Memory Jobs', queueStatus?.queues.memoryWrites.waiting ?? [])}
+          {renderJobList('Failed Memory Jobs', queueStatus?.queues.memoryWrites.failed ?? [])}
+          {renderJobList('Completed Memory Jobs', queueStatus?.queues.memoryWrites.completed ?? [])}
         </CardContent>
       </Card>
     </div>

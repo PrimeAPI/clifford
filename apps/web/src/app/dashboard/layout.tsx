@@ -15,6 +15,7 @@ import {
   Send,
   ListChecks,
   History,
+  Brain,
 } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
@@ -25,6 +26,7 @@ const navigation = [
   { name: 'Channels', href: '/dashboard/channels', icon: Send },
   { name: 'Queue', href: '/dashboard/queue', icon: ListChecks },
   { name: 'History', href: '/dashboard/history', icon: History },
+  { name: 'Memories', href: '/dashboard/memories', icon: Brain },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
 ];
 

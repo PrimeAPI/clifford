@@ -45,6 +45,13 @@ export default function QueueOverviewPage() {
                     (queueStatus?.queues.deliveries.counts.waiting ?? 0)}
                 </p>
               </div>
+              <div>
+                <p className="text-xs text-muted-foreground">Memory Writes</p>
+                <p className="text-lg font-semibold">
+                  {(queueStatus?.queues.memoryWrites.counts.active ?? 0) +
+                    (queueStatus?.queues.memoryWrites.counts.waiting ?? 0)}
+                </p>
+              </div>
             </div>
             <Button asChild className="w-full">
               <Link href="/dashboard/queue/tasks">
@@ -67,7 +74,8 @@ export default function QueueOverviewPage() {
                 <p className="text-lg font-semibold">
                   {(queueStatus?.queues.messages.counts.completed ?? 0) +
                     (queueStatus?.queues.runs.counts.completed ?? 0) +
-                    (queueStatus?.queues.deliveries.counts.completed ?? 0)}
+                    (queueStatus?.queues.deliveries.counts.completed ?? 0) +
+                    (queueStatus?.queues.memoryWrites.counts.completed ?? 0)}
                 </p>
               </div>
               <div>
@@ -75,7 +83,8 @@ export default function QueueOverviewPage() {
                 <p className="text-lg font-semibold">
                   {(queueStatus?.queues.messages.counts.failed ?? 0) +
                     (queueStatus?.queues.runs.counts.failed ?? 0) +
-                    (queueStatus?.queues.deliveries.counts.failed ?? 0)}
+                    (queueStatus?.queues.deliveries.counts.failed ?? 0) +
+                    (queueStatus?.queues.memoryWrites.counts.failed ?? 0)}
                 </p>
               </div>
             </div>

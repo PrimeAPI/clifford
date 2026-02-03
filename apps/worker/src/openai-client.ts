@@ -8,7 +8,17 @@ interface OpenAIResponse {
   }>;
 }
 
-export async function callOpenAI(apiKey: string, model: string, input: string) {
+export interface OpenAIMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+export async function callOpenAI(
+  apiKey: string,
+  model: string,
+  messages: OpenAIMessage[],
+  options?: { temperature?: number }
+) {
   const response = await fetch(`${config.openaiBaseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -17,17 +27,8 @@ export async function callOpenAI(apiKey: string, model: string, input: string) {
     },
     body: JSON.stringify({
       model,
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a helpful assistant.',
-        },
-        {
-          role: 'user',
-          content: input,
-        },
-      ],
-      temperature: 0.2,
+      messages,
+      temperature: options?.temperature ?? 0.2,
     }),
   });
 

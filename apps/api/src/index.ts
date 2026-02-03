@@ -6,10 +6,12 @@ import { runRoutes } from './routes/runs.js';
 import { eventRoutes } from './routes/events.js';
 import { channelRoutes } from './routes/channels.js';
 import { messageRoutes } from './routes/messages.js';
+import { contextRoutes } from './routes/contexts.js';
 import { discordRoutes } from './routes/discord.js';
 import { settingsRoutes } from './routes/settings.js';
 import { queueRoutes } from './routes/queue.js';
 import { deliveryRoutes } from './routes/deliveries.js';
+import { memoryRoutes } from './routes/memories.js';
 
 const app = Fastify({
   logger: {
@@ -23,8 +25,10 @@ await app.register(runRoutes);
 await app.register(eventRoutes);
 await app.register(channelRoutes);
 await app.register(messageRoutes);
+await app.register(contextRoutes);
 await app.register(discordRoutes);
 await app.register(settingsRoutes);
+await app.register(memoryRoutes);
 await app.register(queueRoutes);
 await app.register(deliveryRoutes);
 

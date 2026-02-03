@@ -48,7 +48,7 @@ docker compose up -d
 ```
 
 This starts:
-- Postgres on port 5432
+- Postgres on port 5433
 - Redis on port 6379
 - MinIO on ports 9000/9001
 

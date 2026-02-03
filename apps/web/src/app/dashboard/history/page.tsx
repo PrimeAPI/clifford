@@ -26,13 +26,15 @@ type HistoryTask = {
   timestamp?: number;
   detail?: string;
   data?: unknown;
+  meta?: Record<string, unknown>;
   failedReason?: string;
+  result?: unknown;
   kind: 'run' | 'queue';
 };
 
 const DEMO_TENANT_ID = '00000000-0000-0000-0000-000000000000';
 const RUN_LIMIT = 50;
-const queueFilterOptions = ['all', 'runs', 'messages', 'deliveries'] as const;
+const queueFilterOptions = ['all', 'runs', 'messages', 'deliveries', 'memorywrites'] as const;
 
 const getTaskTime = (job: QueueJob) => job.finishedOn ?? job.processedOn ?? job.timestamp ?? 0;
 
@@ -48,6 +50,10 @@ const buildQueueTasks = (queueStatus: ReturnType<typeof useQueueStatus>['queueSt
     { queue: 'Deliveries', status: 'waiting', jobs: queueStatus.queues.deliveries.waiting },
     { queue: 'Deliveries', status: 'failed', jobs: queueStatus.queues.deliveries.failed },
     { queue: 'Deliveries', status: 'completed', jobs: queueStatus.queues.deliveries.completed },
+    { queue: 'MemoryWrites', status: 'active', jobs: queueStatus.queues.memoryWrites.active },
+    { queue: 'MemoryWrites', status: 'waiting', jobs: queueStatus.queues.memoryWrites.waiting },
+    { queue: 'MemoryWrites', status: 'failed', jobs: queueStatus.queues.memoryWrites.failed },
+    { queue: 'MemoryWrites', status: 'completed', jobs: queueStatus.queues.memoryWrites.completed },
   ];
 
   return buckets.flatMap(({ queue, status, jobs }) =>
@@ -56,6 +62,9 @@ const buildQueueTasks = (queueStatus: ReturnType<typeof useQueueStatus>['queueSt
       queue,
       status,
       name: job.name,
+      detail: job.detail,
+      meta: job.meta,
+      result: job.result,
       data: job.data,
       failedReason: job.failedReason,
       timestamp: getTaskTime(job),
@@ -78,6 +87,27 @@ const buildRunTasks = (runs: RunRecord[]) =>
 const formatTimestamp = (timestamp?: number) => {
   if (!timestamp) return '—';
   return new Date(timestamp).toLocaleString();
+};
+
+const formatMetaLine = (meta?: Record<string, unknown>) => {
+  if (!meta) return '';
+  const channelName = meta.channelName as string | undefined;
+  const channelId = meta.channelId as string | undefined;
+  const contextName = meta.contextName as string | undefined;
+  const contextId = meta.contextId as string | undefined;
+  const source = meta.source as string | undefined;
+
+  const parts: string[] = [];
+  if (channelName || channelId) {
+    parts.push(`Channel: ${channelName ?? channelId}`);
+  }
+  if (contextName || contextId) {
+    parts.push(`Context: ${contextName ?? contextId}`);
+  }
+  if (source) {
+    parts.push(`Source: ${source}`);
+  }
+  return parts.join(' • ');
 };
 
 export default function HistoryPage() {
@@ -157,7 +187,8 @@ export default function HistoryPage() {
       if (statusFilter !== 'all' && task.status !== statusFilter) return false;
       if (!query) return true;
 
-      const base = `${task.id} ${task.queue} ${task.status} ${task.name} ${task.detail ?? ''}`.toLowerCase();
+      const metaText = task.meta ? formatMetaLine(task.meta) : '';
+      const base = `${task.id} ${task.queue} ${task.status} ${task.name} ${task.detail ?? ''} ${metaText}`.toLowerCase();
       if (base.includes(query)) return true;
       if (task.data) {
         try {
@@ -231,7 +262,11 @@ export default function HistoryPage() {
             >
               {queueFilterOptions.map((option) => (
                 <option key={option} value={option}>
-                  {option === 'all' ? 'All Queues' : option[0].toUpperCase() + option.slice(1)}
+                  {option === 'all'
+                    ? 'All Queues'
+                    : option === 'memorywrites'
+                      ? 'Memory Writes'
+                      : option[0].toUpperCase() + option.slice(1)}
                 </option>
               ))}
             </select>
@@ -270,13 +305,29 @@ export default function HistoryPage() {
                   {task.detail ? (
                     <p className="mt-2 text-xs text-muted-foreground">Input: {task.detail}</p>
                   ) : null}
+                  {task.meta ? (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {formatMetaLine(task.meta)}
+                    </p>
+                  ) : null}
                   {task.failedReason ? (
                     <p className="mt-2 text-xs text-destructive">Error: {task.failedReason}</p>
                   ) : null}
+                  {task.kind === 'queue' && (task as { result?: unknown }).result ? (
+                    <div className="mt-2 space-y-1">
+                      <p className="text-[11px] uppercase text-muted-foreground">Response</p>
+                      <pre className="whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
+                        {JSON.stringify((task as { result?: unknown }).result, null, 2)}
+                      </pre>
+                    </div>
+                  ) : null}
                   {task.data ? (
-                    <pre className="mt-2 whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
-                      {JSON.stringify(task.data, null, 2)}
-                    </pre>
+                    <div className="mt-2 space-y-1">
+                      <p className="text-[11px] uppercase text-muted-foreground">Input</p>
+                      <pre className="whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
+                        {JSON.stringify(task.data, null, 2)}
+                      </pre>
+                    </div>
                   ) : null}
                   {task.kind === 'run' ? (
                     <div className="mt-3">

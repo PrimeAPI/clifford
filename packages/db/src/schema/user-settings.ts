@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, boolean } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, boolean, integer } from 'drizzle-orm/pg-core';
 import { users } from './users';
 
 export const userSettings = pgTable('user_settings', {
@@ -15,6 +15,12 @@ export const userSettings = pgTable('user_settings', {
   llmApiKeyIv: text('llm_api_key_iv'),
   llmApiKeyTag: text('llm_api_key_tag'),
   llmApiKeyLast4: text('llm_api_key_last4'),
+  defaultSystemPrompt: text('default_system_prompt')
+    .notNull()
+    .default('You are Clifford, a very skilled and highly complex AI-Assistent!'),
+  crossChannelContextEnabled: boolean('cross_channel_context_enabled').notNull().default(true),
+  crossChannelContextLimit: integer('cross_channel_context_limit').notNull().default(12),
+  memoryEnabled: boolean('memory_enabled').notNull().default(true),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });

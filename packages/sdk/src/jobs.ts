@@ -56,4 +56,29 @@ export const DeliveryAckJobSchema = z.object({
 
 export type DeliveryAckJob = z.infer<typeof DeliveryAckJobSchema>;
 
-export type Job = RunJob | WakeJob | DiscordEventJob | MessageJob | DeliveryJob | DeliveryAckJob;
+export const MemoryWriteJobSchema = z.object({
+  type: z.literal('memory_write'),
+  contextId: z.string(),
+  userId: z.string(),
+  mode: z.enum(['close', 'compact']),
+  segmentMessages: z
+    .array(
+      z.object({
+        direction: z.enum(['inbound', 'outbound']),
+        content: z.string(),
+        createdAt: z.string().optional(),
+      })
+    )
+    .optional(),
+});
+
+export type MemoryWriteJob = z.infer<typeof MemoryWriteJobSchema>;
+
+export type Job =
+  | RunJob
+  | WakeJob
+  | DiscordEventJob
+  | MessageJob
+  | DeliveryJob
+  | DeliveryAckJob
+  | MemoryWriteJob;

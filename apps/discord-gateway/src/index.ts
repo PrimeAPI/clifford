@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Events, Partials } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Partials, SlashCommandBuilder } from 'discord.js';
 import { Worker } from 'bullmq';
 import pino from 'pino';
 import { config } from './config.js';
@@ -19,6 +19,24 @@ const client = new Client({
   ],
   partials: [Partials.Channel],
 });
+
+const contextCommands = [
+  new SlashCommandBuilder()
+    .setName('context-new')
+    .setDescription('Create and activate a new context')
+    .addStringOption((option) =>
+      option.setName('name').setDescription('Optional context name').setRequired(false)
+    ),
+  new SlashCommandBuilder()
+    .setName('context-list')
+    .setDescription('List contexts available in this channel'),
+  new SlashCommandBuilder()
+    .setName('context-use')
+    .setDescription('Activate a context by ID')
+    .addStringOption((option) =>
+      option.setName('context_id').setDescription('Context ID').setRequired(true)
+    ),
+].map((command) => command.toJSON());
 
 const connection = {
   url: config.redisUrl,
@@ -82,6 +100,15 @@ const startDeliveryWorker = () => {
 client.on('ready', () => {
   logger.info({ user: client.user?.tag }, 'Discord bot connected');
   startDeliveryWorker();
+
+  client.application
+    ?.commands.set(contextCommands)
+    .then(() => {
+      logger.info('Discord slash commands registered');
+    })
+    .catch((err) => {
+      logger.error({ err }, 'Failed to register slash commands');
+    });
 });
 
 client.on(Events.MessageCreate, async (message) => {
@@ -154,6 +181,127 @@ client.on(Events.MessageCreate, async (message) => {
   } catch (err) {
     logger.error({ err }, 'Error forwarding Discord message');
     await message.reply('❌ An error occurred. Please try again later.');
+  }
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (!config.deliveryToken) {
+    await interaction.reply({
+      content: 'Discord context commands are unavailable (delivery token not configured).',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const discordUserId = interaction.user.id;
+  const discordUsername = `${interaction.user.username}#${interaction.user.discriminator}`;
+
+  try {
+    if (interaction.commandName === 'context-list') {
+      await interaction.deferReply({ ephemeral: true });
+
+      const params = new URLSearchParams({
+        discordUserId,
+        discordUsername,
+      });
+
+      const res = await fetch(`${config.apiUrl}/api/discord/contexts?${params.toString()}`, {
+        headers: {
+          'X-Delivery-Token': config.deliveryToken,
+        },
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        await interaction.editReply(`Failed to load contexts: ${res.status} ${errorText}`);
+        return;
+      }
+
+      const data = (await res.json()) as {
+        contexts?: Array<{ id: string; name: string }>;
+        activeContextId?: string | null;
+      };
+
+      const items = data.contexts ?? [];
+      if (items.length === 0) {
+        await interaction.editReply('No contexts yet. Use /context-new to create one.');
+        return;
+      }
+
+      const lines = items.map((context) => {
+        const isActive = context.id === data.activeContextId;
+        return `${isActive ? '* ' : ''}${context.name} (${context.id})`;
+      });
+
+      await interaction.editReply(lines.join('\n'));
+      return;
+    }
+
+    if (interaction.commandName === 'context-new') {
+      await interaction.deferReply({ ephemeral: true });
+      const name = interaction.options.getString('name') ?? undefined;
+
+      const res = await fetch(`${config.apiUrl}/api/discord/contexts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Delivery-Token': config.deliveryToken,
+        },
+        body: JSON.stringify({ discordUserId, discordUsername, name }),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        await interaction.editReply(`Failed to create context: ${res.status} ${errorText}`);
+        return;
+      }
+
+      const data = (await res.json()) as { context?: { id: string; name: string } };
+      if (data.context) {
+        await interaction.editReply(
+          `Created and activated context "${data.context.name}" (${data.context.id}).`
+        );
+        return;
+      }
+
+      await interaction.editReply('Context created.');
+      return;
+    }
+
+    if (interaction.commandName === 'context-use') {
+      await interaction.deferReply({ ephemeral: true });
+      const contextId = interaction.options.getString('context_id', true);
+
+      const res = await fetch(`${config.apiUrl}/api/discord/contexts/${contextId}/activate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Delivery-Token': config.deliveryToken,
+        },
+        body: JSON.stringify({ discordUserId, discordUsername }),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        await interaction.editReply(`Failed to activate context: ${res.status} ${errorText}`);
+        return;
+      }
+
+      await interaction.editReply(`Activated context ${contextId}.`);
+      return;
+    }
+  } catch (err) {
+    logger.error({ err }, 'Discord interaction failed');
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply('An error occurred while handling that command.');
+    } else {
+      await interaction.reply({
+        content: 'An error occurred while handling that command.',
+        ephemeral: true,
+      });
+    }
   }
 });
 

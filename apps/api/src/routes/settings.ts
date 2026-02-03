@@ -12,6 +12,22 @@ const llmSettingsSchema = z.object({
   apiKey: z.string().optional().nullable(),
 });
 
+const systemPromptSchema = z.object({
+  defaultSystemPrompt: z.string().min(1).nullable(),
+});
+
+const crossChannelSchema = z.object({
+  enabled: z.boolean().optional(),
+  limit: z.coerce.number().int().min(1).max(50).optional(),
+});
+
+const memorySchema = z.object({
+  enabled: z.boolean().optional(),
+});
+
+const DEFAULT_SYSTEM_PROMPT =
+  'You are Clifford, a very skilled and highly complex AI-Assistent!';
+
 async function ensureUser(db: ReturnType<typeof getDb>, userId: string) {
   const [existingUser] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   if (!existingUser) {
@@ -121,6 +137,147 @@ export async function settingsRoutes(app: FastifyInstance) {
       model: merged?.llmModel ?? 'gpt-4o-mini',
       hasApiKey: Boolean(merged?.llmApiKeyEncrypted),
       apiKeyLast4: merged?.llmApiKeyLast4 ?? null,
+    };
+  });
+
+  app.get('/api/settings/system-prompt', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const db = getDb();
+    await ensureUser(db, userId);
+    const settings = await ensureSettings(db, userId);
+
+    return {
+      defaultSystemPrompt: settings?.defaultSystemPrompt ?? DEFAULT_SYSTEM_PROMPT,
+    };
+  });
+
+  app.put('/api/settings/system-prompt', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const body = systemPromptSchema.parse(req.body);
+    const db = getDb();
+    await ensureUser(db, userId);
+    const existing = await ensureSettings(db, userId);
+
+    const nextPrompt = body.defaultSystemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+
+    const [updated] = await db
+      .update(userSettings)
+      .set({ defaultSystemPrompt: nextPrompt, updatedAt: new Date() })
+      .where(eq(userSettings.userId, userId))
+      .returning();
+
+    const merged = updated ?? existing;
+
+    return {
+      defaultSystemPrompt: merged?.defaultSystemPrompt ?? DEFAULT_SYSTEM_PROMPT,
+    };
+  });
+
+  app.get('/api/settings/context-bridge', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const db = getDb();
+    await ensureUser(db, userId);
+    const settings = await ensureSettings(db, userId);
+
+    return {
+      enabled: settings?.crossChannelContextEnabled ?? true,
+      limit: settings?.crossChannelContextLimit ?? 12,
+    };
+  });
+
+  app.put('/api/settings/context-bridge', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const body = crossChannelSchema.parse(req.body);
+    const db = getDb();
+    await ensureUser(db, userId);
+    const existing = await ensureSettings(db, userId);
+
+    const updates: Partial<typeof userSettings.$inferInsert> = {
+      updatedAt: new Date(),
+    };
+
+    if (body.enabled !== undefined) {
+      updates.crossChannelContextEnabled = body.enabled;
+    }
+
+    if (body.limit !== undefined) {
+      updates.crossChannelContextLimit = body.limit;
+    }
+
+    const [updated] = await db
+      .update(userSettings)
+      .set(updates)
+      .where(eq(userSettings.userId, userId))
+      .returning();
+
+    const merged = updated ?? existing;
+
+    return {
+      enabled: merged?.crossChannelContextEnabled ?? true,
+      limit: merged?.crossChannelContextLimit ?? 12,
+    };
+  });
+
+  app.get('/api/settings/memory', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const db = getDb();
+    await ensureUser(db, userId);
+    const settings = await ensureSettings(db, userId);
+
+    return {
+      enabled: settings?.memoryEnabled ?? true,
+    };
+  });
+
+  app.put('/api/settings/memory', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const body = memorySchema.parse(req.body);
+    const db = getDb();
+    await ensureUser(db, userId);
+    const existing = await ensureSettings(db, userId);
+
+    const updates: Partial<typeof userSettings.$inferInsert> = {
+      updatedAt: new Date(),
+    };
+
+    if (body.enabled !== undefined) {
+      updates.memoryEnabled = body.enabled;
+    }
+
+    const [updated] = await db
+      .update(userSettings)
+      .set(updates)
+      .where(eq(userSettings.userId, userId))
+      .returning();
+
+    const merged = updated ?? existing;
+
+    return {
+      enabled: merged?.memoryEnabled ?? true,
     };
   });
 }

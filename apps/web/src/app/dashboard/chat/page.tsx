@@ -10,6 +10,7 @@ interface Channel {
   id: string;
   type: string;
   name: string;
+  activeContextId?: string | null;
 }
 
 interface Message {
@@ -18,6 +19,13 @@ interface Message {
   direction: string;
   createdAt: string;
   metadata?: string | null;
+  contextId?: string | null;
+}
+
+interface ContextItem {
+  id: string;
+  name: string;
+  createdAt: string;
 }
 
 export default function ChatPage() {
@@ -27,7 +35,11 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [pendingReplyTo, setPendingReplyTo] = useState<string | null>(null);
+  const [contexts, setContexts] = useState<ContextItem[]>([]);
+  const [activeContextId, setActiveContextId] = useState<string | null>(null);
+  const [contextLoading, setContextLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const activeContext = contexts.find((context) => context.id === activeContextId) ?? contexts[0];
 
   useEffect(() => {
     loadWebChannel();
@@ -36,10 +48,16 @@ export default function ChatPage() {
   useEffect(() => {
     if (!webChannel) return;
 
+    loadContexts();
+  }, [webChannel]);
+
+  useEffect(() => {
+    if (!webChannel) return;
+
     loadMessages();
     const interval = setInterval(loadMessages, 3000);
     return () => clearInterval(interval);
-  }, [webChannel]);
+  }, [webChannel, activeContextId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -66,7 +84,8 @@ export default function ChatPage() {
 
     try {
       const userId = '00000000-0000-0000-0000-000000000001';
-      const res = await fetch(`/api/messages?channelId=${webChannel.id}`, {
+      const contextParam = activeContextId ? `&contextId=${activeContextId}` : '';
+      const res = await fetch(`/api/messages?channelId=${webChannel.id}${contextParam}`, {
         headers: { 'X-User-Id': userId },
       });
       const data = await res.json();
@@ -83,12 +102,80 @@ export default function ChatPage() {
             return false;
           }
         });
-        if (hasReply) {
+        let hasFallbackReply = false;
+        if (!hasReply) {
+          const pendingMessage = nextMessages.find((msg) => msg.id === pendingReplyTo);
+          if (pendingMessage) {
+            const pendingTime = new Date(pendingMessage.createdAt).getTime();
+            hasFallbackReply = nextMessages.some(
+              (msg) =>
+                msg.direction === 'outbound' &&
+                new Date(msg.createdAt).getTime() >= pendingTime &&
+                msg.id !== pendingReplyTo
+            );
+          }
+        }
+        if (hasReply || hasFallbackReply) {
           setPendingReplyTo(null);
         }
       }
     } catch (err) {
       console.error('Failed to load messages:', err);
+    }
+  };
+
+  const loadContexts = async () => {
+    if (!webChannel) return;
+
+    setContextLoading(true);
+    try {
+      const userId = '00000000-0000-0000-0000-000000000001';
+      const res = await fetch(`/api/contexts?channelId=${webChannel.id}`, {
+        headers: { 'X-User-Id': userId },
+      });
+      const data = await res.json();
+      setContexts(data.contexts || []);
+      setActiveContextId(data.activeContextId || null);
+    } catch (err) {
+      console.error('Failed to load contexts:', err);
+    } finally {
+      setContextLoading(false);
+    }
+  };
+
+  const handleCreateContext = async () => {
+    if (!webChannel || contextLoading) return;
+
+    setContextLoading(true);
+    try {
+      const userId = '00000000-0000-0000-0000-000000000001';
+      if (activeContextId) {
+        await fetch(`/api/contexts/${activeContextId}/close`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-User-Id': userId,
+          },
+        });
+      }
+      const res = await fetch('/api/contexts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': userId,
+        },
+        body: JSON.stringify({
+          channelId: webChannel.id,
+        }),
+      });
+
+      const data = await res.json();
+      setActiveContextId(data.activeContextId || null);
+      await loadContexts();
+    } catch (err) {
+      console.error('Failed to create context:', err);
+    } finally {
+      setContextLoading(false);
     }
   };
 
@@ -106,6 +193,7 @@ export default function ChatPage() {
         },
         body: JSON.stringify({
           channelId: webChannel.id,
+          contextId: activeContextId ?? undefined,
           content: input,
         }),
       });
@@ -156,19 +244,31 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-8rem)] flex-col">
-      <Card className="flex flex-1 flex-col">
+    <div className="flex h-[calc(100vh-8rem)] flex-col overflow-hidden">
+      <Card className="flex flex-1 min-h-0 flex-col">
         <CardHeader className="border-b border-border">
-          <CardTitle>
-            <div className="flex items-center gap-2">
-              <Globe className="h-5 w-5" />
-              Web Chat
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <CardTitle>
+              <div className="flex items-center gap-2">
+                <Globe className="h-5 w-5" />
+                Web Chat
+              </div>
+            </CardTitle>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleCreateContext}
+                disabled={contextLoading}
+              >
+                New Session
+              </Button>
             </div>
-          </CardTitle>
+          </div>
         </CardHeader>
 
         {/* Messages */}
-        <CardContent className="flex-1 overflow-y-auto p-4">
+        <CardContent className="flex-1 min-h-0 overflow-y-auto p-4">
           {messages.length === 0 ? (
             <div className="flex h-full items-center justify-center text-center">
               <div>
@@ -185,33 +285,64 @@ export default function ChatPage() {
                 <div
                   key={message.id}
                   className={`flex ${
-                    message.direction === 'outbound' ? 'justify-end' : 'justify-start'
+                    message.direction === 'inbound' ? 'justify-end' : 'justify-start'
                   }`}
                 >
-                  <div
-                    className={`max-w-[70%] rounded-lg px-4 py-2 ${
-                      message.direction === 'outbound'
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted'
-                    }`}
-                  >
-                    <p className="whitespace-pre-wrap break-words">{message.content}</p>
-                    <p
-                      className={`mt-1 text-xs ${
-                        message.direction === 'outbound'
-                          ? 'text-primary-foreground/70'
-                          : 'text-muted-foreground'
+                  <div className="flex items-start gap-3">
+                    {message.direction !== 'inbound' ? (
+                      <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">
+                        C
+                      </div>
+                    ) : null}
+                    <div
+                      className={`max-w-[70%] rounded-lg px-4 py-2 ${
+                        message.direction === 'inbound'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-muted'
                       }`}
                     >
-                      {new Date(message.createdAt).toLocaleTimeString()}
-                    </p>
+                      <p className="text-xs font-semibold uppercase tracking-wide opacity-70">
+                        {message.direction === 'inbound' ? 'You' : 'Clifford'}
+                      </p>
+                      <p className="mt-1 whitespace-pre-wrap break-words">{message.content}</p>
+                      <p
+                        className={`mt-1 text-xs ${
+                          message.direction === 'inbound'
+                            ? 'text-primary-foreground/70'
+                            : 'text-muted-foreground'
+                        }`}
+                      >
+                        {new Date(message.createdAt).toLocaleTimeString()}
+                      </p>
+                    </div>
+                    {message.direction === 'inbound' ? (
+                      <div className="flex h-9 w-9 items-center justify-center rounded-full bg-muted text-sm font-semibold text-foreground">
+                        U
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))}
-              {pendingReplyTo ? (
-                <div className="flex justify-end">
-                  <div className="max-w-[70%] rounded-lg bg-primary/10 px-4 py-2 text-primary">
-                    <p className="text-sm font-medium">Processing…</p>
+              {pendingReplyTo && messages[messages.length - 1]?.direction === 'inbound' ? (
+                <div className="flex justify-start">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">
+                      C
+                    </div>
+                    <div className="max-w-[70%] rounded-lg bg-muted px-4 py-2 text-foreground">
+                      <p className="text-xs font-semibold uppercase tracking-wide opacity-70">
+                        Clifford
+                      </p>
+                      <p className="mt-1 flex items-center gap-1 text-lg leading-none">
+                        <span className="animate-pulse">•</span>
+                        <span className="animate-pulse" style={{ animationDelay: '150ms' }}>
+                          •
+                        </span>
+                        <span className="animate-pulse" style={{ animationDelay: '300ms' }}>
+                          •
+                        </span>
+                      </p>
+                    </div>
                   </div>
                 </div>
               ) : null}

@@ -28,9 +28,18 @@ export default function SettingsPage() {
   const [llmApiKey, setLlmApiKey] = useState('');
   const [savingLlm, setSavingLlm] = useState(false);
   const [loadingLlm, setLoadingLlm] = useState(true);
+  const [defaultSystemPrompt, setDefaultSystemPrompt] = useState('');
+  const [savingPrompt, setSavingPrompt] = useState(false);
+  const [loadingPrompt, setLoadingPrompt] = useState(true);
+  const [contextBridgeEnabled, setContextBridgeEnabled] = useState(true);
+  const [contextBridgeLimit, setContextBridgeLimit] = useState('12');
+  const [savingBridge, setSavingBridge] = useState(false);
+  const [loadingBridge, setLoadingBridge] = useState(true);
 
   useEffect(() => {
     loadLlmSettings();
+    loadSystemPrompt();
+    loadContextBridge();
   }, []);
 
   const loadLlmSettings = async () => {
@@ -111,6 +120,106 @@ export default function SettingsPage() {
       console.error('Failed to clear LLM key:', err);
     } finally {
       setSavingLlm(false);
+    }
+  };
+
+  const loadSystemPrompt = async () => {
+    setLoadingPrompt(true);
+    try {
+      const res = await fetch('/api/settings/system-prompt', {
+        headers: { 'X-User-Id': DEMO_USER_ID },
+      });
+      const data = (await res.json()) as { defaultSystemPrompt?: string };
+      setDefaultSystemPrompt(
+        data.defaultSystemPrompt || 'You are Clifford, a very skilled and highly complex AI-Assistent!'
+      );
+    } catch (err) {
+      console.error('Failed to load system prompt:', err);
+    } finally {
+      setLoadingPrompt(false);
+    }
+  };
+
+  const saveSystemPrompt = async () => {
+    setSavingPrompt(true);
+    try {
+      const res = await fetch('/api/settings/system-prompt', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': DEMO_USER_ID,
+        },
+        body: JSON.stringify({
+          defaultSystemPrompt: defaultSystemPrompt.trim() || null,
+        }),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        console.error('Failed to save system prompt:', error);
+        return;
+      }
+
+      const data = (await res.json()) as { defaultSystemPrompt?: string };
+      if (data.defaultSystemPrompt) {
+        setDefaultSystemPrompt(data.defaultSystemPrompt);
+      }
+    } catch (err) {
+      console.error('Failed to save system prompt:', err);
+    } finally {
+      setSavingPrompt(false);
+    }
+  };
+
+  const loadContextBridge = async () => {
+    setLoadingBridge(true);
+    try {
+      const res = await fetch('/api/settings/context-bridge', {
+        headers: { 'X-User-Id': DEMO_USER_ID },
+      });
+      const data = (await res.json()) as { enabled?: boolean; limit?: number };
+      setContextBridgeEnabled(data.enabled ?? true);
+      setContextBridgeLimit(String(data.limit ?? 12));
+    } catch (err) {
+      console.error('Failed to load context bridge settings:', err);
+    } finally {
+      setLoadingBridge(false);
+    }
+  };
+
+  const saveContextBridge = async () => {
+    setSavingBridge(true);
+    try {
+      const payload: { enabled?: boolean; limit?: number } = {
+        enabled: contextBridgeEnabled,
+      };
+      const parsedLimit = Number(contextBridgeLimit);
+      if (!Number.isNaN(parsedLimit) && parsedLimit > 0) {
+        payload.limit = parsedLimit;
+      }
+
+      const res = await fetch('/api/settings/context-bridge', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': DEMO_USER_ID,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        console.error('Failed to save context bridge settings:', error);
+        return;
+      }
+
+      const data = (await res.json()) as { enabled?: boolean; limit?: number };
+      setContextBridgeEnabled(data.enabled ?? true);
+      setContextBridgeLimit(String(data.limit ?? 12));
+    } catch (err) {
+      console.error('Failed to save context bridge settings:', err);
+    } finally {
+      setSavingBridge(false);
     }
   };
 
@@ -212,6 +321,78 @@ export default function SettingsPage() {
               Clear API Key
             </Button>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* System Instructions */}
+      <Card>
+        <CardHeader>
+          <CardTitle>System Instructions</CardTitle>
+          <CardDescription>Default context prompt for Clifford</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <label htmlFor="system-prompt" className="text-sm font-medium">
+              Default Instructions
+            </label>
+            <textarea
+              id="system-prompt"
+              className="min-h-[120px] w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+              value={defaultSystemPrompt}
+              onChange={(e) => setDefaultSystemPrompt(e.target.value)}
+              placeholder="You are Clifford, a very skilled and highly complex AI-Assistent!"
+              disabled={loadingPrompt}
+            />
+            <p className="text-xs text-muted-foreground">
+              This prompt is injected at the start of every new context.
+            </p>
+          </div>
+          <Button onClick={saveSystemPrompt} disabled={savingPrompt || loadingPrompt}>
+            {savingPrompt ? 'Saving…' : 'Save System Instructions'}
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Cross-Channel Context */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Cross-Channel Context</CardTitle>
+          <CardDescription>Let Clifford see active contexts from other channels.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="font-medium">Enable Context Bridge</p>
+              <p className="text-sm text-muted-foreground">
+                Includes active context history from other channels.
+              </p>
+            </div>
+            <Button
+              variant={contextBridgeEnabled ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setContextBridgeEnabled(!contextBridgeEnabled)}
+              disabled={loadingBridge}
+            >
+              {contextBridgeEnabled ? 'Enabled' : 'Disabled'}
+            </Button>
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="context-bridge-limit" className="text-sm font-medium">
+              Message Limit (per channel)
+            </label>
+            <Input
+              id="context-bridge-limit"
+              type="number"
+              min="1"
+              max="50"
+              value={contextBridgeLimit}
+              onChange={(e) => setContextBridgeLimit(e.target.value)}
+              disabled={loadingBridge}
+            />
+          </div>
+          <Button onClick={saveContextBridge} disabled={savingBridge || loadingBridge}>
+            {savingBridge ? 'Saving…' : 'Save Context Bridge Settings'}
+          </Button>
         </CardContent>
       </Card>
 

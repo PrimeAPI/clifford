@@ -10,6 +10,7 @@ export const messages = pgTable('messages', {
   channelId: uuid('channel_id')
     .notNull()
     .references(() => channels.id, { onDelete: 'cascade' }),
+  contextId: uuid('context_id'),
   content: text('content').notNull(),
   direction: text('direction').notNull().default('inbound'), // inbound|outbound
   metadata: text('metadata'), // JSON string for additional data

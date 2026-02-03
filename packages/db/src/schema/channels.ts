@@ -9,6 +9,7 @@ export const channels = pgTable('channels', {
   type: text('type').notNull(), // web|discord
   name: text('name').notNull(),
   enabled: boolean('enabled').notNull().default(true),
+  activeContextId: uuid('active_context_id'),
   config: jsonb('config'), // Channel-specific config (e.g., discord_user_id)
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),

@@ -10,6 +10,9 @@ export interface QueueJob {
   timestamp?: number;
   processedOn?: number;
   finishedOn?: number;
+  result?: unknown;
+  detail?: string;
+  meta?: Record<string, unknown>;
 }
 
 export interface QueueStatus {
@@ -29,6 +32,13 @@ export interface QueueStatus {
       failed: QueueJob[];
     };
     deliveries: {
+      counts: Record<string, number>;
+      active: QueueJob[];
+      waiting: QueueJob[];
+      completed: QueueJob[];
+      failed: QueueJob[];
+    };
+    memoryWrites: {
       counts: Record<string, number>;
       active: QueueJob[];
       waiting: QueueJob[];
