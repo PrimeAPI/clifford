@@ -1,14 +1,23 @@
 import type { Metadata } from 'next';
+import { Inter } from 'next/font/google';
+import './globals.css';
+import { ThemeProvider } from '@/components/theme-provider';
+
+const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'Clifford',
-  description: 'Autonomous agent platform',
+  title: 'Clifford - AI Agent Platform',
+  description: 'Autonomous agent platform for building and deploying AI agents',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body style={{ margin: 0, padding: '20px', fontFamily: 'sans-serif' }}>{children}</body>
+    <html lang="en" suppressHydrationWarning>
+      <body className={inter.className}>
+        <ThemeProvider defaultTheme="system" storageKey="clifford-theme">
+          {children}
+        </ThemeProvider>
+      </body>
     </html>
   );
 }
