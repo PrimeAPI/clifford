@@ -9,12 +9,12 @@ import {
   Home,
   MessageSquare,
   Settings,
-  Users,
-  Zap,
   LogOut,
   Menu,
   X,
   Send,
+  ListChecks,
+  History,
 } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
@@ -23,8 +23,8 @@ const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: Home },
   { name: 'Chat', href: '/dashboard/chat', icon: MessageSquare },
   { name: 'Channels', href: '/dashboard/channels', icon: Send },
-  { name: 'Agents', href: '/dashboard/agents', icon: Bot },
-  { name: 'Runs', href: '/dashboard/runs', icon: Zap },
+  { name: 'Queue', href: '/dashboard/queue', icon: ListChecks },
+  { name: 'History', href: '/dashboard/history', icon: History },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
 ];
 

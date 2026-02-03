@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getDb, runs, runSteps } from '@clifford/db';
-import { eq, desc } from 'drizzle-orm';
+import { getDb, runs, runSteps, agents } from '@clifford/db';
+import { eq, desc, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { enqueueRun } from '../queue.js';
 
@@ -10,7 +10,56 @@ const createRunSchema = z.object({
   inputText: z.string().min(1),
 });
 
+const listRunsQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
 export async function runRoutes(app: FastifyInstance) {
+  // List recent runs
+  app.get('/api/runs', async (req, reply) => {
+    const tenantId = req.headers['x-tenant-id'] as string;
+    if (!tenantId) {
+      return reply.status(400).send({ error: 'Missing X-Tenant-Id header' });
+    }
+
+    const query = listRunsQuerySchema.parse(req.query);
+    const limit = query.limit ?? 50;
+    const offset = query.offset ?? 0;
+
+    const db = getDb();
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(runs)
+      .where(eq(runs.tenantId, tenantId));
+    const total = Number(count ?? 0);
+
+    const recentRuns = await db
+      .select({
+        id: runs.id,
+        agentId: runs.agentId,
+        agentName: agents.name,
+        inputText: runs.inputText,
+        status: runs.status,
+        createdAt: runs.createdAt,
+        updatedAt: runs.updatedAt,
+      })
+      .from(runs)
+      .leftJoin(agents, eq(runs.agentId, agents.id))
+      .where(eq(runs.tenantId, tenantId))
+      .orderBy(desc(runs.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    return {
+      runs: recentRuns,
+      total,
+      limit,
+      offset,
+      hasMore: offset + recentRuns.length < total,
+    };
+  });
+
   // Create a new run
   app.post('/api/runs', async (req, reply) => {
     const tenantId = req.headers['x-tenant-id'] as string;
@@ -48,7 +97,20 @@ export async function runRoutes(app: FastifyInstance) {
     const { id } = req.params;
     const db = getDb();
 
-    const run = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    const run = await db
+      .select({
+        id: runs.id,
+        agentId: runs.agentId,
+        agentName: agents.name,
+        inputText: runs.inputText,
+        status: runs.status,
+        createdAt: runs.createdAt,
+        updatedAt: runs.updatedAt,
+      })
+      .from(runs)
+      .leftJoin(agents, eq(runs.agentId, agents.id))
+      .where(eq(runs.id, id))
+      .limit(1);
     if (run.length === 0) {
       return reply.status(404).send({ error: 'Run not found' });
     }
