@@ -1,0 +1,32 @@
+{
+  "name": "@clifford/worker",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@clifford/db": "workspace:*",
+    "@clifford/policy": "workspace:*",
+    "@clifford/sdk": "workspace:*",
+    "@clifford/skill-example": "workspace:*",
+    "@clifford/tools-core": "workspace:*",
+    "bullmq": "^5.32.2",
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.36.4",
+    "ioredis": "^5.4.2",
+    "nanoid": "^5.0.9",
+    "pino": "^9.6.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
