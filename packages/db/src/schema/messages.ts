@@ -13,6 +13,9 @@ export const messages = pgTable('messages', {
   content: text('content').notNull(),
   direction: text('direction').notNull().default('inbound'), // inbound|outbound
   metadata: text('metadata'), // JSON string for additional data
+  deliveryStatus: text('delivery_status').notNull().default('delivered'), // pending|delivered|failed
+  deliveryError: text('delivery_error'),
+  deliveredAt: timestamp('delivered_at'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
 });
 

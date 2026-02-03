@@ -18,11 +18,16 @@ export interface ToolContext {
   logger: Logger;
 }
 
+type LogFn = {
+  (msg: string, meta?: object): void;
+  (obj: object, msg?: string): void;
+};
+
 export interface Logger {
-  info: (msg: string, meta?: object) => void;
-  warn: (msg: string, meta?: object) => void;
-  error: (msg: string, meta?: object) => void;
-  debug: (msg: string, meta?: object) => void;
+  info: LogFn;
+  warn: LogFn;
+  error: LogFn;
+  debug: LogFn;
 }
 
 // Tool Call & Result

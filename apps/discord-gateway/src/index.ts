@@ -1,4 +1,5 @@
 import { Client, GatewayIntentBits, Events, Partials } from 'discord.js';
+import { Worker } from 'bullmq';
 import pino from 'pino';
 import { config } from './config.js';
 
@@ -19,8 +20,68 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
+const connection = {
+  url: config.redisUrl,
+};
+
+let deliveryWorker: Worker | null = null;
+
+const startDeliveryWorker = () => {
+  if (deliveryWorker) return;
+
+  deliveryWorker = new Worker(
+    'clifford-deliveries',
+    async (job) => {
+      if (!config.deliveryToken) {
+        throw new Error('DELIVERY_TOKEN not configured');
+      }
+
+      const { provider, payload, messageId } = job.data as {
+        provider?: string;
+        payload?: { discordUserId?: string; content?: string };
+        messageId?: string;
+      };
+
+      if (provider !== 'discord') {
+        throw new Error(`Unsupported delivery provider: ${provider ?? 'unknown'}`);
+      }
+
+      const discordUserId = payload?.discordUserId;
+      const content = payload?.content;
+
+      if (!discordUserId || !content || !messageId) {
+        throw new Error('Missing Discord delivery payload');
+      }
+
+      const user = await client.users.fetch(discordUserId);
+      await user.send(content);
+
+      const ackResponse = await fetch(`${config.apiUrl}/api/deliveries/ack`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Delivery-Token': config.deliveryToken,
+        },
+        body: JSON.stringify({ messageId, status: 'delivered' }),
+      });
+
+      if (!ackResponse.ok) {
+        const errorText = await ackResponse.text();
+        throw new Error(`Delivery ack failed: ${ackResponse.status} ${errorText}`);
+      }
+
+      logger.info({ messageId }, 'Discord delivery completed');
+    },
+    {
+      connection,
+      concurrency: 5,
+    }
+  );
+};
+
 client.on('ready', () => {
   logger.info({ user: client.user?.tag }, 'Discord bot connected');
+  startDeliveryWorker();
 });
 
 client.on(Events.MessageCreate, async (message) => {
@@ -34,6 +95,8 @@ client.on(Events.MessageCreate, async (message) => {
   if (!isDM && !isMentioned) return;
 
   const content = isDM ? message.content : message.content.replace(`<@${client.user?.id}>`, '').trim();
+
+  await message.channel.sendTyping();
 
   if (isDM) {
     const lowerContent = content.trim().toLowerCase();
@@ -87,9 +150,6 @@ client.on(Events.MessageCreate, async (message) => {
           '⚠️ This bot is not configured to accept DMs yet. Please ask the owner to enable Discord DMs.'
         );
       }
-    } else {
-      // Acknowledge receipt
-      await message.react('✅');
     }
   } catch (err) {
     logger.error({ err }, 'Error forwarding Discord message');
@@ -104,12 +164,18 @@ logger.info('Discord gateway starting');
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down');
+  if (deliveryWorker) {
+    await deliveryWorker.close();
+  }
   client.destroy();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   logger.info('SIGINT received, shutting down');
+  if (deliveryWorker) {
+    await deliveryWorker.close();
+  }
   client.destroy();
   process.exit(0);
 });

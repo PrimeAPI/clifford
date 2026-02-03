@@ -78,12 +78,18 @@ importers:
 
   apps/discord-gateway:
     dependencies:
+      bullmq:
+        specifier: ^5.32.2
+        version: 5.67.2
       discord.js:
         specifier: ^14.17.3
         version: 14.25.1
       dotenv:
         specifier: ^16.4.7
         version: 16.6.1
+      ioredis:
+        specifier: ^5.4.2
+        version: 5.9.2
       pino:
         specifier: ^9.6.0
         version: 9.14.0

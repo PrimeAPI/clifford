@@ -14,3 +14,4 @@ export * from './user-settings';
 export * from './channels';
 export * from './messages';
 export * from './discord-connections';
+export * from './discord-outbox';

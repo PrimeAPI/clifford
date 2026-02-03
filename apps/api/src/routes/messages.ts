@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getDb, messages, channels } from '@clifford/db';
 import { eq, and, desc } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
+import { enqueueMessage } from '../queue.js';
 
 const sendMessageSchema = z.object({
   channelId: z.string(),
@@ -83,8 +84,17 @@ export async function messageRoutes(app: FastifyInstance) {
         channelId: body.channelId,
         content: body.content,
         direction: 'inbound',
+        deliveryStatus: 'delivered',
+        deliveredAt: new Date(),
       })
       .returning();
+
+    if (message) {
+      await enqueueMessage({
+        type: 'message',
+        messageId: message.id,
+      });
+    }
 
     app.log.info({ messageId: message?.id, channelId: body.channelId }, 'Message sent');
 

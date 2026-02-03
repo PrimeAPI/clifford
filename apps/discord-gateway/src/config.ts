@@ -11,5 +11,8 @@ export const config = {
   discordBotToken: process.env.DISCORD_BOT_TOKEN || '',
   apiUrl: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000',
   tenantId: process.env.TENANT_ID || '00000000-0000-0000-0000-000000000000',
+  deliveryToken: process.env.DELIVERY_TOKEN || process.env.DISCORD_OUTBOX_TOKEN || '',
+  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+  outboxPollIntervalMs: parseInt(process.env.OUTBOX_POLL_INTERVAL_MS || '3000', 10),
   logLevel: process.env.LOG_LEVEL || 'info',
 };

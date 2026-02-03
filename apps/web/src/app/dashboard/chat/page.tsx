@@ -17,6 +17,7 @@ interface Message {
   content: string;
   direction: string;
   createdAt: string;
+  metadata?: string | null;
 }
 
 export default function ChatPage() {
@@ -25,6 +26,7 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
+  const [pendingReplyTo, setPendingReplyTo] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -68,7 +70,23 @@ export default function ChatPage() {
         headers: { 'X-User-Id': userId },
       });
       const data = await res.json();
-      setMessages((data.messages || []).reverse());
+      const nextMessages = (data.messages || []).reverse();
+      setMessages(nextMessages);
+
+      if (pendingReplyTo) {
+        const hasReply = nextMessages.some((msg: Message) => {
+          if (msg.direction !== 'outbound' || !msg.metadata) return false;
+          try {
+            const meta = JSON.parse(msg.metadata);
+            return meta?.replyTo === pendingReplyTo;
+          } catch {
+            return false;
+          }
+        });
+        if (hasReply) {
+          setPendingReplyTo(null);
+        }
+      }
     } catch (err) {
       console.error('Failed to load messages:', err);
     }
@@ -80,7 +98,7 @@ export default function ChatPage() {
     setLoading(true);
     try {
       const userId = '00000000-0000-0000-0000-000000000001';
-      await fetch('/api/messages', {
+      const res = await fetch('/api/messages', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -91,6 +109,11 @@ export default function ChatPage() {
           content: input,
         }),
       });
+
+      const data = await res.json();
+      if (data.message?.id) {
+        setPendingReplyTo(data.message.id);
+      }
 
       setInput('');
       await loadMessages();
@@ -185,6 +208,13 @@ export default function ChatPage() {
                   </div>
                 </div>
               ))}
+              {pendingReplyTo ? (
+                <div className="flex justify-end">
+                  <div className="max-w-[70%] rounded-lg bg-primary/10 px-4 py-2 text-primary">
+                    <p className="text-sm font-medium">Processing…</p>
+                  </div>
+                </div>
+              ) : null}
               <div ref={messagesEndRef} />
             </div>
           )}

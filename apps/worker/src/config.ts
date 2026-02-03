@@ -11,6 +11,9 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL || '',
   redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
   workerConcurrency: parseInt(process.env.WORKER_CONCURRENCY || '5', 10),
+  encryptionKey: process.env.DATA_ENCRYPTION_KEY || '',
+  openaiBaseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+  discordBotToken: process.env.DISCORD_BOT_TOKEN || '',
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
 };

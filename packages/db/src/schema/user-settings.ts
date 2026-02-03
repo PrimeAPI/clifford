@@ -9,6 +9,12 @@ export const userSettings = pgTable('user_settings', {
     .references(() => users.id, { onDelete: 'cascade' }),
   theme: text('theme').notNull().default('system'), // light|dark|system
   notifications: boolean('notifications').notNull().default(true),
+  llmProvider: text('llm_provider').notNull().default('openai'),
+  llmModel: text('llm_model').notNull().default('gpt-4o-mini'),
+  llmApiKeyEncrypted: text('llm_api_key_encrypted'),
+  llmApiKeyIv: text('llm_api_key_iv'),
+  llmApiKeyTag: text('llm_api_key_tag'),
+  llmApiKeyLast4: text('llm_api_key_last4'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });

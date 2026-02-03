@@ -11,8 +11,10 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
+    "bullmq": "^5.32.2",
     "discord.js": "^14.17.3",
     "dotenv": "^16.4.7",
+    "ioredis": "^5.4.2",
     "pino": "^9.6.0"
   },
   "devDependencies": {

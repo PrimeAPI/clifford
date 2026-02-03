@@ -31,4 +31,29 @@ export const DiscordEventJobSchema = z.object({
 
 export type DiscordEventJob = z.infer<typeof DiscordEventJobSchema>;
 
-export type Job = RunJob | WakeJob | DiscordEventJob;
+export const MessageJobSchema = z.object({
+  type: z.literal('message'),
+  messageId: z.string(),
+});
+
+export type MessageJob = z.infer<typeof MessageJobSchema>;
+
+export const DeliveryJobSchema = z.object({
+  type: z.literal('delivery'),
+  provider: z.string(),
+  messageId: z.string(),
+  payload: z.record(z.unknown()),
+});
+
+export type DeliveryJob = z.infer<typeof DeliveryJobSchema>;
+
+export const DeliveryAckJobSchema = z.object({
+  type: z.literal('delivery_ack'),
+  messageId: z.string(),
+  status: z.enum(['delivered', 'failed']),
+  error: z.string().optional(),
+});
+
+export type DeliveryAckJob = z.infer<typeof DeliveryAckJobSchema>;
+
+export type Job = RunJob | WakeJob | DiscordEventJob | MessageJob | DeliveryJob | DeliveryAckJob;

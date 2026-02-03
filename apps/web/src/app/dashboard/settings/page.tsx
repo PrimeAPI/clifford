@@ -1,18 +1,194 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useTheme } from '@/components/theme-provider';
-import { Moon, Sun, Monitor } from 'lucide-react';
+import { Moon, Sun, Monitor, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
+
+interface LlmSettings {
+  provider: string;
+  model: string;
+  hasApiKey: boolean;
+  apiKeyLast4: string | null;
+}
+
+interface QueueStatus {
+  queues: {
+    runs: {
+      counts: Record<string, number>;
+      active: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+      waiting: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+      completed: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+      failed: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+    };
+    messages: {
+      counts: Record<string, number>;
+      active: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+      waiting: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+      completed: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+      failed: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+    };
+    deliveries: {
+      counts: Record<string, number>;
+      active: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+      waiting: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+      completed: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+      failed: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>;
+    };
+  };
+}
+
+const DEMO_USER_ID = '00000000-0000-0000-0000-000000000001';
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
   const [name, setName] = useState('Demo User');
   const [email, setEmail] = useState('demo@clifford.ai');
   const [notifications, setNotifications] = useState(true);
+
+  const [llmSettings, setLlmSettings] = useState<LlmSettings | null>(null);
+  const [llmModel, setLlmModel] = useState('gpt-4o-mini');
+  const [llmApiKey, setLlmApiKey] = useState('');
+  const [savingLlm, setSavingLlm] = useState(false);
+  const [loadingLlm, setLoadingLlm] = useState(true);
+
+  const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
+  const [loadingQueue, setLoadingQueue] = useState(false);
+
+  useEffect(() => {
+    loadLlmSettings();
+    loadQueueStatus();
+    const interval = setInterval(loadQueueStatus, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const loadLlmSettings = async () => {
+    setLoadingLlm(true);
+    try {
+      const res = await fetch('/api/settings/llm', {
+        headers: { 'X-User-Id': DEMO_USER_ID },
+      });
+      const data = (await res.json()) as LlmSettings;
+      setLlmSettings(data);
+      setLlmModel(data.model || 'gpt-4o-mini');
+    } catch (err) {
+      console.error('Failed to load LLM settings:', err);
+    } finally {
+      setLoadingLlm(false);
+    }
+  };
+
+  const saveLlmSettings = async () => {
+    setSavingLlm(true);
+    try {
+      const payload: { provider?: string; model?: string; apiKey?: string | null } = {
+        provider: 'openai',
+        model: llmModel.trim(),
+      };
+
+      if (llmApiKey.trim()) {
+        payload.apiKey = llmApiKey.trim();
+      }
+
+      const res = await fetch('/api/settings/llm', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': DEMO_USER_ID,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        console.error('Failed to save LLM settings:', error);
+        return;
+      }
+
+      const data = (await res.json()) as LlmSettings;
+      setLlmSettings(data);
+      setLlmApiKey('');
+    } catch (err) {
+      console.error('Failed to save LLM settings:', err);
+    } finally {
+      setSavingLlm(false);
+    }
+  };
+
+  const clearLlmKey = async () => {
+    setSavingLlm(true);
+    try {
+      const res = await fetch('/api/settings/llm', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Id': DEMO_USER_ID,
+        },
+        body: JSON.stringify({ apiKey: null }),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        console.error('Failed to clear LLM key:', error);
+        return;
+      }
+
+      const data = (await res.json()) as LlmSettings;
+      setLlmSettings(data);
+      setLlmApiKey('');
+    } catch (err) {
+      console.error('Failed to clear LLM key:', err);
+    } finally {
+      setSavingLlm(false);
+    }
+  };
+
+  const loadQueueStatus = async () => {
+    setLoadingQueue(true);
+    try {
+      const res = await fetch('/api/queue/status', {
+        headers: { 'X-User-Id': DEMO_USER_ID },
+      });
+      const data = (await res.json()) as QueueStatus;
+      setQueueStatus(data);
+    } catch (err) {
+      console.error('Failed to load queue status:', err);
+    } finally {
+      setLoadingQueue(false);
+    }
+  };
+
+  const renderJobList = (
+    title: string,
+    jobs: Array<{ id: string; name: string; data?: unknown; failedReason?: string }>
+  ) => (
+    <div className="space-y-2">
+      <p className="font-medium">{title}</p>
+      {jobs.length ? (
+        <div className="space-y-2 rounded-md border border-border p-3">
+          {jobs.map((job) => (
+            <div key={job.id} className="space-y-1 border-b border-border pb-2 last:border-0 last:pb-0">
+              <p className="text-sm font-medium">{job.id}</p>
+              <p className="text-xs text-muted-foreground">Type: {job.name}</p>
+              {job.failedReason ? (
+                <p className="text-xs text-destructive">Error: {job.failedReason}</p>
+              ) : null}
+              {job.data ? (
+                <pre className="whitespace-pre-wrap break-words rounded bg-muted p-2 text-xs">
+                  {JSON.stringify(job.data, null, 2)}
+                </pre>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-muted-foreground">No jobs.</p>
+      )}
+    </div>
+  );
 
   return (
     <div className="space-y-6">
@@ -54,6 +230,116 @@ export default function SettingsPage() {
           </div>
 
           <Button>Save Changes</Button>
+        </CardContent>
+      </Card>
+
+      {/* LLM Settings */}
+      <Card>
+        <CardHeader>
+          <CardTitle>LLM Settings</CardTitle>
+          <CardDescription>Configure the OpenAI model and API token</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Provider</label>
+            <Input value="OpenAI" disabled />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="llm-model" className="text-sm font-medium">
+              Model
+            </label>
+            <Input
+              id="llm-model"
+              value={llmModel}
+              onChange={(e) => setLlmModel(e.target.value)}
+              placeholder="gpt-4o-mini"
+              disabled={loadingLlm}
+            />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="llm-key" className="text-sm font-medium">
+              API Key
+            </label>
+            <Input
+              id="llm-key"
+              type="password"
+              value={llmApiKey}
+              onChange={(e) => setLlmApiKey(e.target.value)}
+              placeholder={
+                llmSettings?.hasApiKey
+                  ? `Stored (ends with ${llmSettings.apiKeyLast4 ?? '????'})`
+                  : 'sk-...'
+              }
+              disabled={loadingLlm}
+            />
+            <p className="text-xs text-muted-foreground">
+              Keys are encrypted using the server encryption key and never stored in plaintext.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={saveLlmSettings} disabled={savingLlm || loadingLlm}>
+              {savingLlm ? 'Saving…' : 'Save LLM Settings'}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={clearLlmKey}
+              disabled={savingLlm || !llmSettings?.hasApiKey}
+            >
+              Clear API Key
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Queue Status */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>Queue Status</CardTitle>
+              <CardDescription>Live view of queued and active tasks</CardDescription>
+            </div>
+            <Button variant="outline" size="sm" onClick={loadQueueStatus} disabled={loadingQueue}>
+              <RefreshCw className={cn('h-4 w-4', loadingQueue && 'animate-spin')} />
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4 text-sm">
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <p className="font-medium">Message Queue</p>
+              <p>Active: {queueStatus?.queues.messages.counts.active ?? 0}</p>
+              <p>Waiting: {queueStatus?.queues.messages.counts.waiting ?? 0}</p>
+              <p>Completed: {queueStatus?.queues.messages.counts.completed ?? 0}</p>
+              <p>Failed: {queueStatus?.queues.messages.counts.failed ?? 0}</p>
+            </div>
+            <div className="space-y-2">
+              <p className="font-medium">Run Queue</p>
+              <p>Active: {queueStatus?.queues.runs.counts.active ?? 0}</p>
+              <p>Waiting: {queueStatus?.queues.runs.counts.waiting ?? 0}</p>
+              <p>Completed: {queueStatus?.queues.runs.counts.completed ?? 0}</p>
+              <p>Failed: {queueStatus?.queues.runs.counts.failed ?? 0}</p>
+            </div>
+            <div className="space-y-2">
+              <p className="font-medium">Delivery Queue</p>
+              <p>Active: {queueStatus?.queues.deliveries.counts.active ?? 0}</p>
+              <p>Waiting: {queueStatus?.queues.deliveries.counts.waiting ?? 0}</p>
+              <p>Completed: {queueStatus?.queues.deliveries.counts.completed ?? 0}</p>
+              <p>Failed: {queueStatus?.queues.deliveries.counts.failed ?? 0}</p>
+            </div>
+          </div>
+          {renderJobList('Active Message Jobs', queueStatus?.queues.messages.active ?? [])}
+          {renderJobList('Waiting Message Jobs', queueStatus?.queues.messages.waiting ?? [])}
+          {renderJobList('Failed Message Jobs', queueStatus?.queues.messages.failed ?? [])}
+          {renderJobList('Completed Message Jobs', queueStatus?.queues.messages.completed ?? [])}
+          {renderJobList('Active Delivery Jobs', queueStatus?.queues.deliveries.active ?? [])}
+          {renderJobList('Waiting Delivery Jobs', queueStatus?.queues.deliveries.waiting ?? [])}
+          {renderJobList('Failed Delivery Jobs', queueStatus?.queues.deliveries.failed ?? [])}
+          {renderJobList('Completed Delivery Jobs', queueStatus?.queues.deliveries.completed ?? [])}
+          {renderJobList('Active Run Jobs', queueStatus?.queues.runs.active ?? [])}
+          {renderJobList('Waiting Run Jobs', queueStatus?.queues.runs.waiting ?? [])}
+          {renderJobList('Failed Run Jobs', queueStatus?.queues.runs.failed ?? [])}
+          {renderJobList('Completed Run Jobs', queueStatus?.queues.runs.completed ?? [])}
         </CardContent>
       </Card>
 

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getDb, discordConnections, channels, messages } from '@clifford/db';
 import { eq, and, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
+import { enqueueMessage } from '../queue.js';
 
 const discordEventSchema = z.object({
   discordUserId: z.string(),
@@ -171,12 +172,15 @@ export async function discordRoutes(app: FastifyInstance) {
     }
 
     if (allowlistedChannel) {
+      const messageId = randomUUID();
       await db.insert(messages).values({
-        id: randomUUID(),
+        id: messageId,
         userId: allowlistedChannel.userId,
         channelId: allowlistedChannel.id,
         content: body.content,
         direction: 'inbound',
+        deliveryStatus: 'delivered',
+        deliveredAt: new Date(),
         metadata: JSON.stringify({
           discordMessageId: body.messageId,
           discordChannelId: body.channelId,
@@ -184,6 +188,11 @@ export async function discordRoutes(app: FastifyInstance) {
           discordUsername: body.discordUsername,
           discordAvatar: body.discordAvatar ?? null,
         }),
+      });
+
+      await enqueueMessage({
+        type: 'message',
+        messageId,
       });
 
       if (shouldPersistConfig && nextConfig) {
@@ -251,12 +260,15 @@ export async function discordRoutes(app: FastifyInstance) {
     }
 
     // Save message
+    const messageId = randomUUID();
     await db.insert(messages).values({
-      id: randomUUID(),
+      id: messageId,
       userId: connection.userId,
       channelId,
       content: body.content,
       direction: 'inbound',
+      deliveryStatus: 'delivered',
+      deliveredAt: new Date(),
       metadata: JSON.stringify({
         discordMessageId: body.messageId,
         discordChannelId: body.channelId,
@@ -264,6 +276,11 @@ export async function discordRoutes(app: FastifyInstance) {
         discordUsername: body.discordUsername,
         discordAvatar: body.discordAvatar ?? null,
       }),
+    });
+
+    await enqueueMessage({
+      type: 'message',
+      messageId,
     });
 
     app.log.info({ channelId, discordUserId: body.discordUserId }, 'Discord message received');
