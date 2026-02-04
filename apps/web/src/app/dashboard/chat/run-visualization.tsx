@@ -36,6 +36,7 @@ type RunDetails = {
 
 type TaskDialogEntry =
   | { id: string; seq: number; kind: 'decision'; content: string; importance: string }
+  | { id: string; seq: number; kind: 'note'; category: 'requirements' | 'plan' | 'artifact' | 'validation'; content: string }
   | {
       id: string;
       seq: number;
@@ -80,6 +81,19 @@ function TaskDialog({
     const stepMap = details.steps;
 
     stepMap.forEach((step) => {
+      if (step.type === 'note') {
+        const payload = step.resultJson as { category?: string; content?: string } | null;
+        if (payload?.content && payload?.category) {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'note',
+            category: payload.category as 'requirements' | 'plan' | 'artifact' | 'validation',
+            content: payload.content,
+          });
+        }
+      }
+
       if (step.type === 'decision') {
         const payload = step.resultJson as { content?: string; importance?: string } | null;
         if (payload?.content) {
@@ -197,6 +211,16 @@ function TaskDialog({
                 <div key={entry.id} className="rounded border border-border bg-accent/30 p-3">
                   <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
                     Decision · {entry.importance}
+                  </div>
+                  <div className="mt-1 whitespace-pre-wrap">{entry.content}</div>
+                </div>
+              );
+            }
+            if (entry.kind === 'note') {
+              return (
+                <div key={entry.id} className="rounded border border-border bg-muted/40 p-3">
+                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                    {entry.category}
                   </div>
                   <div className="mt-1 whitespace-pre-wrap">{entry.content}</div>
                 </div>

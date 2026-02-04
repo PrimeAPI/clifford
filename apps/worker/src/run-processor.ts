@@ -47,6 +47,11 @@ type RunCommand =
       type: 'decision';
       content: string;
       importance?: 'low' | 'normal' | 'high';
+    }
+  | {
+      type: 'note';
+      category: 'requirements' | 'plan' | 'artifact' | 'validation';
+      content: string;
     };
 type SubagentSpec = {
   id?: string;
@@ -79,6 +84,7 @@ type TranscriptEntry =
   | { type: 'tool_result'; name: string; result: unknown }
   | { type: 'output_update'; output: string; mode: 'replace' | 'append' }
   | { type: 'decision'; content: string; importance?: 'low' | 'normal' | 'high' }
+  | { type: 'note'; category: 'requirements' | 'plan' | 'artifact' | 'validation'; content: string }
   | { type: 'system_note'; content: string };
 
 export async function processRun(job: Job<RunJob>, logger: Logger) {
@@ -226,9 +232,10 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       '3) {"type":"set_output","output":"...","mode":"replace"|"append"}\n' +
       '4) {"type":"finish","output":"...","mode":"replace"|"append"}\n' +
       '5) {"type":"decision","content":"...","importance":"low"|"normal"|"high"}\n' +
-      '6) {"type":"spawn_subagent","subagent":{"profile":"...","task":"...","tools":["..."],"context":[...]}}\n' +
-      '7) {"type":"spawn_subagents","subagents":[{"profile":"...","task":"...","tools":["..."],"context":[...]}]}\n' +
-      '8) {"type":"sleep","reason":"...","wakeAt":"ISO-8601","delaySeconds":123,"cron":"*/5 * * * *"}\n' +
+      '6) {"type":"note","category":"requirements"|"plan"|"artifact"|"validation","content":"..."}\n' +
+      '7) {"type":"spawn_subagent","subagent":{"profile":"...","task":"...","tools":["..."],"context":[...]}}\n' +
+      '8) {"type":"spawn_subagents","subagents":[{"profile":"...","task":"...","tools":["..."],"context":[...]}]}\n' +
+      '9) {"type":"sleep","reason":"...","wakeAt":"ISO-8601","delaySeconds":123,"cron":"*/5 * * * *"}\n' +
       'DEFAULT: answer directly and finish in a single step when possible. ' +
       'Only use tool_call if it is necessary to answer correctly. ' +
       'Avoid multi-step iteration for simple questions. ' +
@@ -241,6 +248,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       'Use set_output when assembling a longer response over multiple steps. ' +
       'Use finish when the task is complete; the output will be sent to the user. ' +
       'Use decision to record brief coordinator reasoning/justifications; it is shown in the coordinator view but not sent to the user. ' +
+      'Use note to record requirements, plan, artifacts, and validation summaries; it is shown in the task view. ' +
       'When unsure or planning multi-step work, emit a decision before taking actions. ' +
       'agentLevel indicates nesting depth: 0 = coordinator, 1 = subagent, 2 = subsubagent. ' +
       'If agentLevel >= 2, you MUST NOT spawn any subagents. ' +
@@ -260,13 +268,30 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       'If a tool returns a missing-parameter error (e.g., region/location required), check memory/search for the value and retry before asking the user. ' +
       'If you need tools, use tool_call and wait for tool_result in the transcript. ' +
       'Use tools.list to see all tools and short descriptions. ' +
-      'Use tools.describe to see full details for a specific tool.\n\n' +
+      'Use tools.describe to see full details for a specific tool. ' +
+      'Process tasks using this internal loop, emitting structured notes so the task dialog shows your work:\n' +
+      'Step 1: Identify the goal/target/output/role. Emit note(category="requirements").\n' +
+      'Step 2: Hard constraints + success criteria. Emit note(category="requirements").\n' +
+      'Step 3: Resources (tools/memories/context). Emit note(category="plan") summarizing what you will use.\n' +
+      'Step 4: Micro-plan and delegation decision. Emit note(category="plan").\n' +
+      'Step 5: Execute tasks and summarize partial results. Emit note(category="artifact") as you go.\n' +
+      'Step 6: Validate outputs. Emit note(category="validation").\n' +
+      'Step 7: Assemble final output. Emit note(category="artifact").\n' +
+      'Step 8: Validate final output. Emit note(category="validation").\n' +
+      'Step 9: Deliver to user or parent agent.\n' +
+      'Error handling: if a task fails, check retry count; retry only when likely to succeed. If not, explain what failed and why, and provide the best alternative.\n\n' +
       toolDescriptions;
 
     const transcript: TranscriptEntry[] = [];
     let outputText = run.outputText ?? '';
     let lastAssistantMessage = '';
     const toolFailureCounts = new Map<string, number>();
+    const noteCounts = {
+      requirements: 0,
+      plan: 0,
+      artifact: 0,
+      validation: 0,
+    };
     const conversation =
       run.kind === 'coordinator'
         ? await loadConversation(db, run.channelId, run.contextId ?? null, undefined)
@@ -380,6 +405,14 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       }
 
       if (command.type === 'tool_call') {
+        if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
+          transcript.push({
+            type: 'system_note',
+            content:
+              'Before taking actions, emit note(category="requirements") and note(category="plan") summarizing goals, constraints, and plan.',
+          });
+          continue;
+        }
         const toolCall: ToolCall = {
           id: nanoid(),
           name: command.name,
@@ -592,6 +625,14 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       }
 
       if (command.type === 'set_output') {
+        if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
+          transcript.push({
+            type: 'system_note',
+            content:
+              'Before producing output, emit note(category="requirements") and note(category="plan").',
+          });
+          continue;
+        }
         const nextOutput = applyOutputUpdate(outputText, command.output, command.mode);
         outputText = nextOutput;
 
@@ -630,7 +671,42 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         continue;
       }
 
+      if (command.type === 'note') {
+        const content = command.content?.trim();
+        if (!content) {
+          throw new Error('note requires non-empty content');
+        }
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'note',
+          resultJson: { category: command.category, content },
+        });
+        transcript.push({ type: 'note', category: command.category, content });
+        if (command.category === 'requirements') noteCounts.requirements += 1;
+        if (command.category === 'plan') noteCounts.plan += 1;
+        if (command.category === 'artifact') noteCounts.artifact += 1;
+        if (command.category === 'validation') noteCounts.validation += 1;
+        continue;
+      }
+
       if (command.type === 'finish') {
+        if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
+          transcript.push({
+            type: 'system_note',
+            content:
+              'Before finishing, emit note(category="requirements") and note(category="plan").',
+          });
+          continue;
+        }
+        if (noteCounts.validation === 0) {
+          transcript.push({
+            type: 'system_note',
+            content:
+              'Before finishing, emit note(category="validation") confirming the output meets constraints.',
+          });
+          continue;
+        }
         if (command.output) {
           outputText = applyOutputUpdate(outputText, command.output, command.mode);
         }
@@ -1236,6 +1312,7 @@ function parseRunCommand(responseText: string): (RunCommand | SpawnCommand) | nu
         parsed.type === 'set_output' ||
         parsed.type === 'finish' ||
         parsed.type === 'decision' ||
+        parsed.type === 'note' ||
         parsed.type === 'spawn_subagent' ||
         parsed.type === 'spawn_subagents' ||
         parsed.type === 'sleep'
