@@ -59,11 +59,27 @@ export const memoryTool: ToolDef = {
         min: 1,
         max: 50,
       },
+      {
+        key: 'max_retries',
+        label: 'Max Retries',
+        description: 'Maximum retries when this tool fails.',
+        type: 'number',
+        min: 0,
+        max: 5,
+      },
+      {
+        key: 'expose_errors',
+        label: 'Expose Errors',
+        description: 'Include tool error details in user-facing messages.',
+        type: 'boolean',
+      },
     ],
     schema: z.object({
       search_limit: z.number().int().min(1).max(50).optional(),
       include_active_default: z.boolean().optional(),
       session_limit: z.number().int().min(1).max(50).optional(),
+      max_retries: z.number().int().min(0).max(5).optional(),
+      expose_errors: z.boolean().optional(),
     }),
   },
   completeRequirement:

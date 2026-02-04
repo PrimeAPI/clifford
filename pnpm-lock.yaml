@@ -121,6 +121,9 @@ importers:
       bullmq:
         specifier: ^5.32.2
         version: 5.67.2
+      cron-parser:
+        specifier: ^4.9.0
+        version: 4.9.0
       dotenv:
         specifier: ^16.4.7
         version: 16.6.1

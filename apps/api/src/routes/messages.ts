@@ -179,10 +179,19 @@ export async function messageRoutes(app: FastifyInstance) {
         userId,
         channelId: body.channelId,
         contextId,
+        kind: 'coordinator',
+        rootRunId: runId,
         inputText: body.content,
         outputText: '',
         status: 'pending',
       });
+
+      await db
+        .update(messages)
+        .set({
+          metadata: JSON.stringify({ runId, kind: 'coordinator' }),
+        })
+        .where(eq(messages.id, message.id));
 
       await enqueueRun({
         type: 'run',

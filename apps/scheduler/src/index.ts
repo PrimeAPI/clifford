@@ -4,6 +4,7 @@ import { getDb, triggers, contexts } from '@clifford/db';
 import { lte, eq, and, isNull } from 'drizzle-orm';
 import type { WakeJob, MemoryWriteJob } from '@clifford/sdk';
 import { config } from './config.js';
+import cronParser from 'cron-parser';
 
 const logger = pino({ level: config.logLevel });
 
@@ -13,6 +14,12 @@ const connection = {
 
 const wakeQueue = new Queue<WakeJob>('clifford-wake', { connection });
 const memoryWriteQueue = new Queue<MemoryWriteJob>('clifford-memory-writes', { connection });
+
+function nextCronFireAt(cron: string, now: Date) {
+  const interval = cronParser.parseExpression(cron, { currentDate: now });
+  const next = interval.next().toDate();
+  return next;
+}
 
 async function tick() {
   const db = getDb();
@@ -31,19 +38,30 @@ async function tick() {
     logger.info({ triggerId: trigger.id }, 'Firing trigger');
 
     // Enqueue wake job
+    const spec = trigger.specJson as { every_seconds?: number; cron?: string; runId?: string };
     await wakeQueue.add('wake', {
       type: 'wake',
       triggerId: trigger.id,
       tenantId: '', // TODO: get from agent
       agentId: trigger.agentId,
+      runId: spec?.runId,
     });
 
     // Calculate next fire time
-    const spec = trigger.specJson as { every_seconds?: number };
     if (trigger.type === 'interval' && spec.every_seconds) {
       const nextFireAt = new Date(now.getTime() + spec.every_seconds * 1000);
       await db.update(triggers).set({ nextFireAt }).where(eq(triggers.id, trigger.id));
       logger.info({ triggerId: trigger.id, nextFireAt }, 'Trigger rescheduled');
+    } else if (trigger.type === 'cron' && spec.cron) {
+      const nextFireAt = nextCronFireAt(spec.cron, now);
+      await db.update(triggers).set({ nextFireAt }).where(eq(triggers.id, trigger.id));
+      logger.info({ triggerId: trigger.id, nextFireAt }, 'Cron trigger rescheduled');
+    } else if (trigger.type === 'run_wake') {
+      await db
+        .update(triggers)
+        .set({ enabled: false, nextFireAt: null })
+        .where(eq(triggers.id, trigger.id));
+      logger.info({ triggerId: trigger.id }, 'Run wake trigger disabled');
     }
   }
 }

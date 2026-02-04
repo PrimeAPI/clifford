@@ -98,10 +98,26 @@ export const remindersTool: ToolDef = {
         min: 1,
         max: 1000,
       },
+      {
+        key: 'max_retries',
+        label: 'Max Retries',
+        description: 'Maximum retries when this tool fails.',
+        type: 'number',
+        min: 0,
+        max: 5,
+      },
+      {
+        key: 'expose_errors',
+        label: 'Expose Errors',
+        description: 'Include tool error details in user-facing messages.',
+        type: 'boolean',
+      },
     ],
     schema: z.object({
       default_timezone: z.string().optional(),
       max_reminders: z.number().int().min(1).max(1000).optional(),
+      max_retries: z.number().int().min(0).max(5).optional(),
+      expose_errors: z.boolean().optional(),
     }),
   },
   commands: [

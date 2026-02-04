@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Send, Globe, MessageSquare, Loader2 } from 'lucide-react';
+import { RunVisualization } from './run-visualization';
 
 interface Channel {
   id: string;
@@ -305,6 +306,9 @@ export default function ChatPage() {
                         {message.direction === 'inbound' ? 'You' : 'Clifford'}
                       </p>
                       <p className="mt-1 whitespace-pre-wrap break-words">{message.content}</p>
+                      {message.direction !== 'inbound' && extractRunId(message.metadata) ? (
+                        <RunVisualization runId={extractRunId(message.metadata)} />
+                      ) : null}
                       <p
                         className={`mt-1 text-xs ${
                           message.direction === 'inbound'
@@ -342,6 +346,9 @@ export default function ChatPage() {
                           •
                         </span>
                       </p>
+                      {messages[messages.length - 1] ? (
+                        <RunVisualization runId={extractRunId(messages[messages.length - 1]?.metadata)} />
+                      ) : null}
                     </div>
                   </div>
                 </div>
@@ -373,4 +380,14 @@ export default function ChatPage() {
       </Card>
     </div>
   );
+}
+
+function extractRunId(metadata?: string | null) {
+  if (!metadata) return '';
+  try {
+    const parsed = JSON.parse(metadata) as { runId?: string };
+    return parsed.runId ?? '';
+  } catch {
+    return '';
+  }
 }

@@ -80,10 +80,26 @@ export const weatherTool: ToolDef = {
         type: 'select',
         options: ['metric', 'imperial'],
       },
+      {
+        key: 'max_retries',
+        label: 'Max Retries',
+        description: 'Maximum retries when this tool fails.',
+        type: 'number',
+        min: 0,
+        max: 5,
+      },
+      {
+        key: 'expose_errors',
+        label: 'Expose Errors',
+        description: 'Include tool error details in user-facing messages.',
+        type: 'boolean',
+      },
     ],
     schema: z.object({
       default_region: z.string().optional(),
       units: z.enum(['metric', 'imperial']).optional(),
+      max_retries: z.number().int().min(0).max(5).optional(),
+      expose_errors: z.boolean().optional(),
     }),
   },
   commands: [

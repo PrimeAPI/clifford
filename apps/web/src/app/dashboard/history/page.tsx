@@ -16,6 +16,8 @@ type RunRecord = {
   status: string;
   createdAt: string;
   updatedAt: string;
+  wakeAt?: string | null;
+  wakeReason?: string | null;
 };
 
 type HistoryTask = {
@@ -397,6 +399,19 @@ export default function HistoryPage() {
                     </p>
                     <p className="mt-2 text-xs text-muted-foreground">Status</p>
                     <p className="font-medium capitalize">{runDetails.run.status}</p>
+                    {runDetails.run.wakeAt ? (
+                      <>
+                        <p className="mt-2 text-xs text-muted-foreground">Wake At</p>
+                        <p className="font-medium">
+                          {new Date(runDetails.run.wakeAt).toLocaleString()}
+                        </p>
+                        {runDetails.run.wakeReason ? (
+                          <p className="text-sm text-muted-foreground">
+                            {runDetails.run.wakeReason}
+                          </p>
+                        ) : null}
+                      </>
+                    ) : null}
                     <p className="mt-2 text-xs text-muted-foreground">Input</p>
                     <p className="text-sm">{runDetails.run.inputText}</p>
                   </div>

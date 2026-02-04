@@ -44,8 +44,16 @@ export async function runRoutes(app: FastifyInstance) {
         channelId: runs.channelId,
         userId: runs.userId,
         contextId: runs.contextId,
+        parentRunId: runs.parentRunId,
+        rootRunId: runs.rootRunId,
+        kind: runs.kind,
+        profile: runs.profile,
         inputText: runs.inputText,
+        inputJson: runs.inputJson,
         outputText: runs.outputText,
+        allowedTools: runs.allowedTools,
+        wakeAt: runs.wakeAt,
+        wakeReason: runs.wakeReason,
         status: runs.status,
         createdAt: runs.createdAt,
         updatedAt: runs.updatedAt,
@@ -98,6 +106,8 @@ export async function runRoutes(app: FastifyInstance) {
       userId,
       channelId: body.channelId,
       contextId: body.contextId ?? null,
+      kind: 'coordinator',
+      rootRunId: runId,
       inputText: body.inputText,
       outputText: '',
       status: 'pending',
@@ -129,8 +139,16 @@ export async function runRoutes(app: FastifyInstance) {
         channelId: runs.channelId,
         userId: runs.userId,
         contextId: runs.contextId,
+        parentRunId: runs.parentRunId,
+        rootRunId: runs.rootRunId,
+        kind: runs.kind,
+        profile: runs.profile,
         inputText: runs.inputText,
+        inputJson: runs.inputJson,
         outputText: runs.outputText,
+        allowedTools: runs.allowedTools,
+        wakeAt: runs.wakeAt,
+        wakeReason: runs.wakeReason,
         status: runs.status,
         createdAt: runs.createdAt,
         updatedAt: runs.updatedAt,
@@ -153,6 +171,41 @@ export async function runRoutes(app: FastifyInstance) {
       run: run[0],
       steps,
     };
+  });
+
+  // List subagent runs for a coordinator
+  app.get<{ Params: { id: string } }>('/api/runs/:id/children', async (req, reply) => {
+    const { id } = req.params;
+    const db = getDb();
+
+    const children = await db
+      .select({
+        id: runs.id,
+        agentId: runs.agentId,
+        agentName: agents.name,
+        channelId: runs.channelId,
+        userId: runs.userId,
+        contextId: runs.contextId,
+        parentRunId: runs.parentRunId,
+        rootRunId: runs.rootRunId,
+        kind: runs.kind,
+        profile: runs.profile,
+        inputText: runs.inputText,
+        inputJson: runs.inputJson,
+        outputText: runs.outputText,
+        allowedTools: runs.allowedTools,
+        wakeAt: runs.wakeAt,
+        wakeReason: runs.wakeReason,
+        status: runs.status,
+        createdAt: runs.createdAt,
+        updatedAt: runs.updatedAt,
+      })
+      .from(runs)
+      .leftJoin(agents, eq(runs.agentId, agents.id))
+      .where(eq(runs.parentRunId, id))
+      .orderBy(desc(runs.createdAt));
+
+    return { children };
   });
 
   // SSE stream for run updates

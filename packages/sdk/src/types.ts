@@ -121,7 +121,17 @@ export interface Run {
   id: string;
   tenantId: string;
   agentId: string;
+  userId?: string | null;
+  channelId?: string | null;
+  contextId?: string | null;
+  parentRunId?: string | null;
+  rootRunId?: string | null;
+  kind?: 'coordinator' | 'subagent' | string;
+  profile?: string | null;
   inputText: string;
+  inputJson?: Record<string, unknown> | null;
+  wakeAt?: Date | null;
+  wakeReason?: string | null;
   status: RunStatus;
   createdAt: Date;
   updatedAt: Date;

@@ -16,6 +16,7 @@ export const WakeJobSchema = z.object({
   triggerId: z.string(),
   tenantId: z.string(),
   agentId: z.string(),
+  runId: z.string().optional(),
 });
 
 export type WakeJob = z.infer<typeof WakeJobSchema>;

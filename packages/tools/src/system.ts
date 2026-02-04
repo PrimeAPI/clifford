@@ -15,9 +15,25 @@ export const systemTool: ToolDef = {
         description: 'If false, system.ping will return an error.',
         type: 'boolean',
       },
+      {
+        key: 'max_retries',
+        label: 'Max Retries',
+        description: 'Maximum retries when this tool fails.',
+        type: 'number',
+        min: 0,
+        max: 5,
+      },
+      {
+        key: 'expose_errors',
+        label: 'Expose Errors',
+        description: 'Include tool error details in user-facing messages.',
+        type: 'boolean',
+      },
     ],
     schema: z.object({
       allow_ping: z.boolean().optional(),
+      max_retries: z.number().int().min(0).max(5).optional(),
+      expose_errors: z.boolean().optional(),
     }),
   },
   commands: [

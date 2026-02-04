@@ -2,10 +2,11 @@ import { Worker } from 'bullmq';
 import pino from 'pino';
 import { config } from './config.js';
 import { processRun } from './run-processor.js';
-import type { RunJob, MessageJob, DeliveryAckJob, MemoryWriteJob } from '@clifford/sdk';
+import type { RunJob, MessageJob, DeliveryAckJob, MemoryWriteJob, WakeJob } from '@clifford/sdk';
 import { processMessage } from './message-processor.js';
 import { processDeliveryAck } from './delivery-ack-processor.js';
 import { processMemoryWrite } from './memory-write-processor.js';
+import { processWake } from './wake-processor.js';
 
 const logger = pino({ level: config.logLevel });
 
@@ -57,6 +58,17 @@ const memoryWriteWorker = new Worker<MemoryWriteJob>(
   }
 );
 
+const wakeWorker = new Worker<WakeJob>(
+  'clifford-wake',
+  async (job) => {
+    return await processWake(job, logger);
+  },
+  {
+    connection,
+    concurrency: config.workerConcurrency,
+  }
+);
+
 runWorker.on('completed', (job) => {
   logger.info({ jobId: job.id }, 'Job completed');
 });
@@ -89,6 +101,14 @@ memoryWriteWorker.on('failed', (job, err) => {
   logger.error({ jobId: job?.id, err }, 'Memory write failed');
 });
 
+wakeWorker.on('completed', (job) => {
+  logger.info({ jobId: job.id }, 'Wake job completed');
+});
+
+wakeWorker.on('failed', (job, err) => {
+  logger.error({ jobId: job?.id, err }, 'Wake job failed');
+});
+
 logger.info(
   { concurrency: config.workerConcurrency },
   'Worker started, listening for jobs on clifford-runs'
@@ -105,6 +125,10 @@ logger.info(
   { concurrency: config.workerConcurrency },
   'Worker started, listening for jobs on clifford-memory-writes'
 );
+logger.info(
+  { concurrency: config.workerConcurrency },
+  'Worker started, listening for jobs on clifford-wake'
+);
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
@@ -113,6 +137,7 @@ process.on('SIGTERM', async () => {
   await messageWorker.close();
   await deliveryAckWorker.close();
   await memoryWriteWorker.close();
+  await wakeWorker.close();
   process.exit(0);
 });
 
@@ -122,5 +147,6 @@ process.on('SIGINT', async () => {
   await messageWorker.close();
   await deliveryAckWorker.close();
   await memoryWriteWorker.close();
+  await wakeWorker.close();
   process.exit(0);
 });

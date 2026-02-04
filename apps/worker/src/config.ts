@@ -17,6 +17,7 @@ export const config = {
   runTranscriptLimit: parseInt(process.env.RUN_TRANSCRIPT_LIMIT || '50', 10),
   runTranscriptTokenLimit: parseInt(process.env.RUN_TRANSCRIPT_TOKEN_LIMIT || '1200', 10),
   runMaxJsonRetries: parseInt(process.env.RUN_MAX_JSON_RETRIES || '1', 10),
+  runMaxToolRetries: parseInt(process.env.RUN_MAX_TOOL_RETRIES || '1', 10),
   runDebugPrompts:
     process.env.RUN_DEBUG_PROMPTS === 'true' ||
     (process.env.NODE_ENV || 'development') === 'development',

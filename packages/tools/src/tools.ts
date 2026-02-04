@@ -29,9 +29,25 @@ export const toolsTool: ToolDef = {
         min: 1,
         max: 100,
       },
+      {
+        key: 'max_retries',
+        label: 'Max Retries',
+        description: 'Maximum retries when this tool fails.',
+        type: 'number',
+        min: 0,
+        max: 5,
+      },
+      {
+        key: 'expose_errors',
+        label: 'Expose Errors',
+        description: 'Include tool error details in user-facing messages.',
+        type: 'boolean',
+      },
     ],
     schema: z.object({
       list_limit: z.number().int().min(1).max(100).optional(),
+      max_retries: z.number().int().min(0).max(5).optional(),
+      expose_errors: z.boolean().optional(),
     }),
   },
   commands: [
@@ -49,7 +65,7 @@ export const toolsTool: ToolDef = {
           name: tool.name,
           shortDescription: tool.shortDescription,
           brief: describeToolBrief(tool),
-          commands: tool.commands.map((command) => command.name),
+          commands: tool.commands.map((command) => `${tool.name}.${command.name}`),
         }));
         const limit = config.list_limit ?? tools.length;
         const limited = tools.slice(0, limit);
