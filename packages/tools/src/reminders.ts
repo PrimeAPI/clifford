@@ -82,6 +82,28 @@ export const remindersTool: ToolDef = {
   shortDescription: 'Create and manage reminders',
   longDescription:
     'Set, read, update, and remove reminders stored per tenant/agent. Uses in-memory storage backed by memory_kv.',
+  config: {
+    fields: [
+      {
+        key: 'default_timezone',
+        label: 'Default Timezone',
+        description: 'Fallback timezone when dueAt is ambiguous.',
+        type: 'string',
+      },
+      {
+        key: 'max_reminders',
+        label: 'Max Reminders',
+        description: 'Maximum number of reminders allowed.',
+        type: 'number',
+        min: 1,
+        max: 1000,
+      },
+    ],
+    schema: z.object({
+      default_timezone: z.string().optional(),
+      max_reminders: z.number().int().min(1).max(1000).optional(),
+    }),
+  },
   commands: [
     {
       name: 'set',
@@ -93,7 +115,12 @@ export const remindersTool: ToolDef = {
       classification: 'WRITE',
       handler: async (ctx, args) => {
         const { reminder } = remindersSetArgs.parse(args);
+        const config = (ctx.toolConfig ?? {}) as { max_reminders?: number };
         const list = await loadReminderState(ctx.tenantId, ctx.agentId);
+        const maxReminders = config.max_reminders ?? 100;
+        if (list.length >= maxReminders && !list.find((item) => item.name === reminder.name)) {
+          return { success: false, error: 'Reminder limit reached', maxReminders };
+        }
         const filtered = list.filter((item) => item.name !== reminder.name);
         filtered.push(reminder);
         await saveReminderState(ctx.tenantId, ctx.agentId, filtered);

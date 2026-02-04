@@ -7,6 +7,19 @@ export const systemTool: ToolDef = {
   longDescription:
     'System-level commands used to verify runtime availability and basic health signals.',
   pinned: true,
+  config: {
+    fields: [
+      {
+        key: 'allow_ping',
+        label: 'Allow Ping',
+        description: 'If false, system.ping will return an error.',
+        type: 'boolean',
+      },
+    ],
+    schema: z.object({
+      allow_ping: z.boolean().optional(),
+    }),
+  },
   commands: [
     {
       name: 'ping',
@@ -15,7 +28,11 @@ export const systemTool: ToolDef = {
       usageExample: '{"name":"system.ping","args":{}}',
       argsSchema: z.object({}),
       classification: 'READ',
-      handler: async () => {
+      handler: async (ctx) => {
+        const config = (ctx.toolConfig ?? {}) as { allow_ping?: boolean };
+        if (config.allow_ping === false) {
+          return { ok: false, error: 'Ping disabled by configuration' };
+        }
         return {
           ok: true,
           ts: new Date().toISOString(),

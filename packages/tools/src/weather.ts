@@ -2,7 +2,7 @@ import type { ToolDef } from '@clifford/sdk';
 import { z } from 'zod';
 
 const weatherGetArgs = z.object({
-  region: z.string(),
+  region: z.string().optional(),
   start: z.string().optional(),
   end: z.string().optional(),
 });
@@ -65,6 +65,27 @@ export const weatherTool: ToolDef = {
   shortDescription: 'Weather lookup by region and timeframe',
   longDescription:
     'Fetches weather information for a specific region and timeframe using Open-Meteo.',
+  config: {
+    fields: [
+      {
+        key: 'default_region',
+        label: 'Default Region',
+        description: 'Used when the caller does not specify a region.',
+        type: 'string',
+      },
+      {
+        key: 'units',
+        label: 'Units',
+        description: 'Preferred units for weather data.',
+        type: 'select',
+        options: ['metric', 'imperial'],
+      },
+    ],
+    schema: z.object({
+      default_region: z.string().optional(),
+      units: z.enum(['metric', 'imperial']).optional(),
+    }),
+  },
   commands: [
     {
       name: 'get',
@@ -74,16 +95,22 @@ export const weatherTool: ToolDef = {
         '{"name":"weather.get","args":{"region":"San Francisco, CA","start":"2026-02-03","end":"2026-02-05"}}',
       argsSchema: weatherGetArgs,
       classification: 'READ',
-      handler: async (_ctx, args) => {
+      handler: async (ctx, args) => {
         const { region, start, end } = weatherGetArgs.parse(args);
-        const location = await geocode(region);
+        const config = (ctx.toolConfig ?? {}) as { default_region?: string; units?: string };
+        const targetRegion = region ?? config.default_region;
+        if (!targetRegion) {
+          return { success: false, error: 'Region is required', region: null };
+        }
+        const location = await geocode(targetRegion);
         if (!location) {
-          return { success: false, error: 'Location not found', region };
+          return { success: false, error: 'Location not found', region: targetRegion };
         }
         const data = await fetchWeather(location, start, end);
         return {
           success: true,
           location,
+          units: config.units ?? 'metric',
           data,
         };
       },

@@ -12,6 +12,8 @@
   },
   "dependencies": {
     "@clifford/db": "workspace:*",
+    "@clifford/tools": "workspace:*",
+    "@clifford/plugins": "workspace:*",
     "@clifford/sdk": "workspace:*",
     "@fastify/cors": "^10.0.1",
     "bullmq": "^5.32.2",

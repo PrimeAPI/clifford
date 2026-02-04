@@ -13,12 +13,31 @@ export interface ToolCommandDef {
   handler: ToolCommandHandler;
 }
 
+export type ToolConfigFieldType = 'string' | 'number' | 'boolean' | 'secret' | 'select';
+
+export interface ToolConfigField {
+  key: string;
+  label: string;
+  description: string;
+  type: ToolConfigFieldType;
+  required?: boolean;
+  options?: string[];
+  min?: number;
+  max?: number;
+}
+
+export interface ToolConfigDef {
+  fields: ToolConfigField[];
+  schema?: z.ZodSchema;
+}
+
 export interface ToolDef {
   name: string;
   shortDescription: string;
   longDescription: string;
   pinned?: boolean;
   important?: boolean;
+  config?: ToolConfigDef;
   completeRequirement?: string;
   commands: ToolCommandDef[];
 }
@@ -34,6 +53,7 @@ export interface ToolContext {
   toolResolver?: ToolResolver;
   userId?: string;
   channelId?: string;
+  toolConfig?: Record<string, unknown>;
 }
 
 type LogFn = {

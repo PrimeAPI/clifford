@@ -35,6 +35,37 @@ export const memoryTool: ToolDef = {
   longDescription:
     'Read/write key-value memory for the agent and search user memory items or past sessions.',
   pinned: true,
+  config: {
+    fields: [
+      {
+        key: 'search_limit',
+        label: 'Search Limit',
+        description: 'Default number of memory items returned by search.',
+        type: 'number',
+        min: 1,
+        max: 50,
+      },
+      {
+        key: 'include_active_default',
+        label: 'Include Active Memories',
+        description: 'Include memories already in the active context window by default.',
+        type: 'boolean',
+      },
+      {
+        key: 'session_limit',
+        label: 'Session List Limit',
+        description: 'Default number of sessions returned.',
+        type: 'number',
+        min: 1,
+        max: 50,
+      },
+    ],
+    schema: z.object({
+      search_limit: z.number().int().min(1).max(50).optional(),
+      include_active_default: z.boolean().optional(),
+      session_limit: z.number().int().min(1).max(50).optional(),
+    }),
+  },
   completeRequirement:
     'If memory updates are needed, they have been reasoned through and completed if necessary.',
   commands: [
@@ -120,6 +151,10 @@ export const memoryTool: ToolDef = {
         if (!ctx.userId) {
           return { success: false, error: 'User context unavailable' };
         }
+        const config = (ctx.toolConfig ?? {}) as {
+          search_limit?: number;
+          include_active_default?: boolean;
+        };
         const db = getDb();
         const pattern = `%${query}%`;
         const match = sql<boolean>`(${memoryItems.value} ILIKE ${pattern} OR ${memoryItems.key} ILIKE ${pattern} OR ${memoryItems.module} ILIKE ${pattern})`;
@@ -129,10 +164,11 @@ export const memoryTool: ToolDef = {
           .from(memoryItems)
           .where(and(eq(memoryItems.userId, ctx.userId), eq(memoryItems.archived, false), match))
           .orderBy(desc(memoryItems.lastSeenAt))
-          .limit(limit ?? 20);
+          .limit(limit ?? config.search_limit ?? 20);
 
-        const activeIds = includeActive ? new Set<string>() : await loadActiveMemoryIds(db, ctx.userId);
-        const results = items.filter((item) => includeActive || !activeIds.has(item.id));
+        const include = includeActive ?? config.include_active_default ?? false;
+        const activeIds = include ? new Set<string>() : await loadActiveMemoryIds(db, ctx.userId);
+        const results = items.filter((item) => include || !activeIds.has(item.id));
 
         return {
           success: true,
@@ -162,13 +198,14 @@ export const memoryTool: ToolDef = {
         if (!ctx.userId) {
           return { success: false, error: 'User context unavailable' };
         }
+        const config = (ctx.toolConfig ?? {}) as { session_limit?: number };
         const db = getDb();
         const rows = await db
           .select()
           .from(contexts)
           .where(eq(contexts.userId, ctx.userId))
           .orderBy(desc(contexts.updatedAt))
-          .limit(limit ?? 10);
+          .limit(limit ?? config.session_limit ?? 10);
 
         return {
           success: true,

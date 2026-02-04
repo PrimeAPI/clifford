@@ -12,6 +12,7 @@ export * from './accounts';
 export * from './sessions';
 export * from './verification-tokens';
 export * from './user-settings';
+export * from './user-tool-settings';
 export * from './channels';
 export * from './contexts';
 export * from './messages';

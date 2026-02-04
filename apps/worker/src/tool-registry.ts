@@ -62,4 +62,8 @@ export class ToolRegistry {
   listTools(): ToolDef[] {
     return this.getAllTools();
   }
+
+  setTools(tools: ToolDef[]) {
+    this.tools = new Map(tools.map((tool) => [tool.name, tool]));
+  }
 }

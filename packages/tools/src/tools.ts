@@ -19,6 +19,21 @@ export const toolsTool: ToolDef = {
   shortDescription: 'Tool discovery and descriptions',
   longDescription: 'List available tools and fetch detailed descriptions for a specific tool.',
   pinned: true,
+  config: {
+    fields: [
+      {
+        key: 'list_limit',
+        label: 'List Limit',
+        description: 'Maximum number of tools returned by tools.list.',
+        type: 'number',
+        min: 1,
+        max: 100,
+      },
+    ],
+    schema: z.object({
+      list_limit: z.number().int().min(1).max(100).optional(),
+    }),
+  },
   commands: [
     {
       name: 'list',
@@ -29,13 +44,16 @@ export const toolsTool: ToolDef = {
       classification: 'READ',
       handler: async (ctx) => {
         const resolver = requireResolver(ctx.toolResolver);
+        const config = (ctx.toolConfig ?? {}) as { list_limit?: number };
         const tools = resolver.listTools().map((tool) => ({
           name: tool.name,
           shortDescription: tool.shortDescription,
           brief: describeToolBrief(tool),
           commands: tool.commands.map((command) => command.name),
         }));
-        return { success: true, tools };
+        const limit = config.list_limit ?? tools.length;
+        const limited = tools.slice(0, limit);
+        return { success: true, tools: limited };
       },
     },
     {

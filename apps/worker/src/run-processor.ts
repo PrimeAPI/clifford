@@ -9,6 +9,7 @@ import {
   userSettings,
   channels,
   messages,
+  userToolSettings,
 } from '@clifford/db';
 import { eq, and } from 'drizzle-orm';
 import { PolicyEngine } from '@clifford/policy';
@@ -92,6 +93,42 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     } else if (enabledPluginNames.length > 0) {
       await toolRegistry.loadPlugins(enabledPluginNames);
     }
+
+    const toolSettings = await db
+      .select()
+      .from(userToolSettings)
+      .where(eq(userToolSettings.userId, run.userId));
+    const toolSettingsMap = new Map(toolSettings.map((row) => [row.toolName, row]));
+    const hasUserToolSettings = toolSettings.length > 0;
+    const toolConfigMap = new Map<string, Record<string, unknown>>();
+
+    const enabledTools = toolRegistry.getAllTools().filter((tool) => {
+      const setting = toolSettingsMap.get(tool.name);
+      return setting?.enabled ?? true;
+    });
+
+    const patchedTools = enabledTools.map((tool) => {
+      const setting = toolSettingsMap.get(tool.name);
+      if (setting?.config && tool.config?.schema) {
+        const parsed = tool.config.schema.safeParse(setting.config);
+        if (parsed.success) {
+          toolConfigMap.set(tool.name, parsed.data as Record<string, unknown>);
+        } else {
+          logger.warn({ tool: tool.name, issues: parsed.error.issues }, 'Invalid tool config');
+          toolConfigMap.set(tool.name, {});
+        }
+      } else {
+        toolConfigMap.set(tool.name, (setting?.config as Record<string, unknown>) ?? {});
+      }
+
+      return {
+        ...tool,
+        pinned: setting?.pinned ?? (hasUserToolSettings ? false : tool.pinned ?? false),
+        important: setting?.important ?? (hasUserToolSettings ? false : tool.important ?? false),
+      };
+    });
+
+    toolRegistry.setTools(patchedTools);
 
     // 4. Initialize policy engine
     const policyEngine = new PolicyEngine();
@@ -282,6 +319,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           policyEngine,
           db,
           logger,
+          toolConfigMap,
         });
 
         stepSeq += 2;
@@ -481,10 +519,12 @@ interface ToolCallContext {
   policyEngine: PolicyEngine;
   db: ReturnType<typeof getDb>;
   logger: Logger;
+  toolConfigMap: Map<string, Record<string, unknown>>;
 }
 
 async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promise<ToolResult> {
-  const { runId, tenantId, agentId, baseSeq, toolRegistry, policyEngine, db, logger } = ctx;
+  const { runId, tenantId, agentId, baseSeq, toolRegistry, policyEngine, db, logger, toolConfigMap } =
+    ctx;
 
   const callStepKey = `${runId}:call:${toolCall.id}`;
   await db.insert(runSteps).values({
@@ -597,6 +637,7 @@ async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promis
   }
 
   try {
+    const toolConfig = toolConfigMap.get(toolName) ?? {};
     const resultPayload = await commandDef.handler(
       {
         tenantId,
@@ -607,6 +648,7 @@ async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promis
         toolResolver: toolRegistry,
         userId: run.userId,
         channelId: run.channelId,
+        toolConfig,
       },
       toolCall.args
     );

@@ -16,6 +16,7 @@ import {
   ListChecks,
   History,
   Brain,
+  Wrench,
 } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
@@ -27,6 +28,7 @@ const navigation = [
   { name: 'Queue', href: '/dashboard/queue', icon: ListChecks },
   { name: 'History', href: '/dashboard/history', icon: History },
   { name: 'Memories', href: '/dashboard/memories', icon: Brain },
+  { name: 'Tools', href: '/dashboard/tools', icon: Wrench },
   { name: 'Settings', href: '/dashboard/settings', icon: Settings },
 ];
 
