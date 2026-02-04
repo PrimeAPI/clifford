@@ -103,9 +103,11 @@ export async function processMemoryWrite(job: Job<MemoryWriteJob>, logger: Logge
   const segmentPrompt = formatSegment(segment);
 
   const systemPrompt =
-    'You are the memory-writer. Extract durable, non-sensitive memories. ' +
+    'You are the memory-writer. Extract durable, non-sensitive memories from the segment. ' +
     'Output ONLY a JSON array of operations. No prose, no markdown. ' +
-    'If no changes are needed, output []. ' +
+    'Do NOT return [] if the segment contains any stable or location facts (e.g., where the user lives), ' +
+    'recurring preferences, long-lived projects, or clear recent context that helps future replies. ' +
+    'Use [] ONLY when there is truly nothing to remember. ' +
     'Operations: add(level,module,key,value,confidence), ' +
     'update(id or module+key, value, confidence), ' +
     'delete(id or module+key), touch(id or module+key). ' +
@@ -113,7 +115,11 @@ export async function processMemoryWrite(job: Job<MemoryWriteJob>, logger: Logge
     'Use modules: identity, preferences, constraints, projects, relationships, environment, recent_context. ' +
     'Keys must be snake_case and short. ' +
     'Higher levels should include more detailed, conversation-specific memories. ' +
-    'Lower levels are durable preferences/identity/constraints. Never store secrets.';
+    'Lower levels are durable preferences/identity/constraints. Never store secrets. ' +
+    'Examples (output only JSON): ' +
+    '[{"op":"add","level":3,"module":"environment","key":"location","value":"Bremen, Germany","confidence":0.5}] ' +
+    '[{"op":"add","level":5,"module":"recent_context","key":"topic","value":"weather in northern Germany","confidence":0.6}] ' +
+    '[{"op":"add","level":1,"module":"identity","key":"name","value":"Alex","confidence":0.7}]';
 
   const userPrompt =
     `Mode: ${mode}\n\n` +
@@ -142,24 +148,6 @@ export async function processMemoryWrite(job: Job<MemoryWriteJob>, logger: Logge
   const operations = parseMemoryOps(responseText, logger);
   if (!operations) {
     logger.warn({ contextId, userId }, 'Memory write skipped: invalid operations');
-    const fallback = buildHeuristicOps(segment);
-    if (fallback.length > 0) {
-      const result = await applyMemoryOps({
-        db,
-        userId,
-        contextId,
-        now,
-        ops: fallback,
-        logger,
-      });
-      return {
-        ok: true,
-        operations: result.applied,
-        skipped: result.skipped,
-        rawResponse: responseText.slice(0, 2000),
-        fallback: true,
-      };
-    }
     return { ok: false, reason: 'invalid_operations', rawResponse: responseText.slice(0, 2000) };
   }
 
@@ -303,11 +291,12 @@ function normalizeMemoryOps(candidate: unknown): unknown {
 function buildHeuristicOps(
   segment: Array<{ direction: string; content: string }>
 ): MemoryOp[] {
+  const ops: MemoryOp[] = [];
   const inbound = segment.filter((entry) => entry.direction === 'inbound');
   for (const entry of inbound) {
     const name = extractName(entry.content);
     if (name) {
-      return [
+      ops.push(
         {
           op: 'add',
           level: 1,
@@ -315,12 +304,37 @@ function buildHeuristicOps(
           key: 'name',
           value: name,
           confidence: 0.7,
-        },
-      ];
+        }
+      );
+      break;
     }
   }
 
-  return [];
+  const location = extractLocation(inbound.map((entry) => entry.content));
+  if (location) {
+    ops.push({
+      op: 'add',
+      level: 3,
+      module: 'environment',
+      key: 'location',
+      value: location,
+      confidence: 0.5,
+    });
+  }
+
+  const topic = extractRecentTopic(segment, location);
+  if (topic) {
+    ops.push({
+      op: 'add',
+      level: 5,
+      module: 'recent_context',
+      key: 'topic',
+      value: topic,
+      confidence: 0.6,
+    });
+  }
+
+  return ops;
 }
 
 function extractName(text: string) {
@@ -337,6 +351,45 @@ function extractName(text: string) {
     if (match && match[1]) {
       return match[1].trim();
     }
+  }
+
+  return '';
+}
+
+function extractLocation(messages: string[]) {
+  const patterns = [
+    /\b(?:i\s*am|i'm|im|i\s*live|i\s*live\s*in|i\s*am\s*in|i'm\s*in|im\s*in)\s+([A-Za-z\u00C0-\u024F'’\-\s]+)/i,
+    /\b(?:ich\s*wohne(?:\s*ja)?|ich\s*lebe|ich\s*bin)\s+(?:in\s+)?([A-Za-z\u00C0-\u024F'’\-\s]+)/i,
+    /\b(?:its|it's|it\s+is)\s+([A-Za-z\u00C0-\u024F'’\-\s]+)/i,
+  ];
+
+  for (const text of messages) {
+    for (const pattern of patterns) {
+      const match = text.match(pattern);
+      if (match && match[1]) {
+        let value = match[1].trim().replace(/\s+/g, ' ');
+        value = value
+          .replace(/[?.!]+$/g, '')
+          .replace(/\s*,\s*und\s*du\s*$/i, '')
+          .replace(/\s*,\s*oder\s*$/i, '')
+          .trim();
+        if (value.length >= 3 && value.length <= 80) {
+          return value;
+        }
+      }
+    }
+  }
+
+  return '';
+}
+
+function extractRecentTopic(
+  segment: Array<{ direction: string; content: string }>,
+  location?: string
+) {
+  const text = segment.map((entry) => entry.content.toLowerCase()).join(' ');
+  if (text.includes('weather')) {
+    return location ? `weather in ${location}` : 'weather';
   }
 
   return '';

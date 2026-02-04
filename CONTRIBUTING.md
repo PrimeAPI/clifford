@@ -57,9 +57,10 @@ feat(db)!: remove auth schema
 BREAKING: auth schema removed; run migrations before deploy.
 ```
 
-### Issue/PR Linking (Required)
-Always link the issue in the commit message footer with `(#123)`.
+### Issue/PR Linking (Preferred)
+Always link the issue in the commit message footer with `(#123)` when available.
 For squash merges, always include the PR number as `(#123)`.
+If no issue/PR number exists, the footer can be omitted.
 
 Example:
 ```
@@ -82,4 +83,3 @@ fix(worker): handle missing memory ops
 2. Make changes with required commit format.
 3. Open a PR with a clear description and linked issues.
 4. Address review feedback and update as needed.
-
