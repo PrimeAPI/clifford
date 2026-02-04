@@ -67,6 +67,7 @@ function TaskDialog({
   onOpenTool: (tool: { name: string; args?: unknown; result?: unknown }) => void;
 }) {
   const { details, children, loading, reload } = useRunDetails(runId);
+  const [showFullOutput, setShowFullOutput] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -190,22 +191,47 @@ function TaskDialog({
         <div>Status: {details.run.status}</div>
         <div>Profile: {details.run.profile ?? details.run.kind ?? 'coordinator'}</div>
       </div>
+      <div className="rounded border border-border p-3 text-xs text-muted-foreground">
+        <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Run Metadata</div>
+        <div className="mt-2 grid grid-cols-1 gap-1 md:grid-cols-2">
+          <div>Run ID: {details.run.id}</div>
+          <div>Agent ID: {details.run.agentId}</div>
+          <div>Kind: {details.run.kind ?? 'coordinator'}</div>
+          <div>Context ID: {details.run.contextId ?? 'none'}</div>
+          <div>Updated: {details.run.updatedAt ?? 'unknown'}</div>
+          <div>Wake Reason: {details.run.wakeReason ?? 'none'}</div>
+          <div>Wake At: {details.run.wakeAt ?? 'none'}</div>
+          <div>Tools Allowed: {Array.isArray(details.run.allowedTools) ? details.run.allowedTools.length : 'all'}</div>
+        </div>
+      </div>
       <div className="rounded border border-border p-3">
         <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Task</div>
         <div className="mt-1">{details.run.inputText}</div>
       </div>
-      {details.run.outputText ? (
-        <div className="rounded border border-border p-3">
-          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Output</div>
-          <div className="mt-1 whitespace-pre-wrap">{details.run.outputText}</div>
-        </div>
-      ) : null}
-
       <div className="space-y-3">
         {entries.length === 0 ? (
           <div className="text-xs text-muted-foreground">No actions recorded yet.</div>
         ) : (
-          entries.map((entry) => {
+          entries.map((entry, index) => {
+            if (entry.kind === 'finish' && details.run.outputText) {
+              const output = details.run.outputText;
+              const preview = output.length > 240 ? `${output.slice(0, 240)}…` : output;
+              return (
+                <div key={`${entry.id}-output`} className="rounded border border-border p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Output</div>
+                    {output.length > 240 ? (
+                      <Button variant="ghost" size="sm" onClick={() => setShowFullOutput((v) => !v)}>
+                        {showFullOutput ? 'Collapse' : 'Expand'}
+                      </Button>
+                    ) : null}
+                  </div>
+                  <div className="mt-1 whitespace-pre-wrap">
+                    {showFullOutput ? output : preview}
+                  </div>
+                </div>
+              );
+            }
             if (entry.kind === 'decision') {
               return (
                 <div key={entry.id} className="rounded border border-border bg-accent/30 p-3">
@@ -494,7 +520,7 @@ export function RunVisualization({ runId }: { runId: string }) {
     <div className="mt-2">
       <div className="flex items-center gap-2">
         <Button
-          variant="ghost"
+          variant="outline"
           size="sm"
           onClick={() => {
             openDialog({ title: 'Task', kind: 'task', content: { runId } });
