@@ -6,6 +6,7 @@ export const systemTool: ToolDef = {
   shortDescription: 'System diagnostics and health checks',
   longDescription:
     'System-level commands used to verify runtime availability and basic health signals.',
+  pinned: true,
   commands: [
     {
       name: 'ping',

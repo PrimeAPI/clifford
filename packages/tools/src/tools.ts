@@ -1,0 +1,60 @@
+import type { ToolDef, ToolResolver } from '@clifford/sdk';
+import { z } from 'zod';
+import { describeToolDetails, describeToolBrief } from '@clifford/sdk';
+
+const listArgs = z.object({});
+const describeArgs = z.object({
+  name: z.string().min(1),
+});
+
+function requireResolver(resolver?: ToolResolver) {
+  if (!resolver) {
+    throw new Error('Tool resolver not available');
+  }
+  return resolver;
+}
+
+export const toolsTool: ToolDef = {
+  name: 'tools',
+  shortDescription: 'Tool discovery and descriptions',
+  longDescription: 'List available tools and fetch detailed descriptions for a specific tool.',
+  pinned: true,
+  commands: [
+    {
+      name: 'list',
+      shortDescription: 'List tools with short descriptions',
+      longDescription: 'Returns all available tools and their short descriptions.',
+      usageExample: '{"name":"tools.list","args":{}}',
+      argsSchema: listArgs,
+      classification: 'READ',
+      handler: async (ctx) => {
+        const resolver = requireResolver(ctx.toolResolver);
+        const tools = resolver.listTools().map((tool) => ({
+          name: tool.name,
+          shortDescription: tool.shortDescription,
+          brief: describeToolBrief(tool),
+          commands: tool.commands.map((command) => command.name),
+        }));
+        return { success: true, tools };
+      },
+    },
+    {
+      name: 'describe',
+      shortDescription: 'Get detailed tool description',
+      longDescription:
+        'Returns the long description and command details for a specified tool name.',
+      usageExample: '{"name":"tools.describe","args":{"name":"memory"}}',
+      argsSchema: describeArgs,
+      classification: 'READ',
+      handler: async (ctx, args) => {
+        const { name } = describeArgs.parse(args);
+        const resolver = requireResolver(ctx.toolResolver);
+        const tool = resolver.getTool(name);
+        if (!tool) {
+          return { success: false, error: 'Tool not found' };
+        }
+        return { success: true, detail: describeToolDetails(tool) };
+      },
+    },
+  ],
+};

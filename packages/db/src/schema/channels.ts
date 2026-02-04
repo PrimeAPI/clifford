@@ -1,11 +1,13 @@
 import { pgTable, text, timestamp, uuid, boolean, jsonb } from 'drizzle-orm/pg-core';
 import { users } from './users';
+import { agents } from './agents';
 
 export const channels = pgTable('channels', {
   id: uuid('id').primaryKey().defaultRandom(),
   userId: uuid('user_id')
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
+  agentId: uuid('agent_id').references(() => agents.id, { onDelete: 'set null' }),
   type: text('type').notNull(), // web|discord
   name: text('name').notNull(),
   enabled: boolean('enabled').notNull().default(true),

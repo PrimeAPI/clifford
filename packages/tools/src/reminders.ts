@@ -1,5 +1,7 @@
 import type { ToolDef } from '@clifford/sdk';
+import { getDb, memoryKv } from '@clifford/db';
 import { z } from 'zod';
+import { and, eq } from 'drizzle-orm';
 
 const reminderSchema = z.object({
   name: z.string(),
@@ -9,6 +11,8 @@ const reminderSchema = z.object({
   repeatRule: z.string().optional(),
   prompt: z.string(),
 });
+
+type Reminder = z.infer<typeof reminderSchema>;
 
 const reminderUpdatesSchema = reminderSchema.partial().omit({ name: true });
 
@@ -29,11 +33,55 @@ const remindersRemoveArgs = z.object({
   name: z.string(),
 });
 
+async function loadReminderState(tenantId: string, agentId: string) {
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(memoryKv)
+    .where(and(eq(memoryKv.tenantId, tenantId), eq(memoryKv.agentId, agentId), eq(memoryKv.key, 'reminders')))
+    .limit(1);
+
+  if (rows.length === 0) {
+    return [] as Reminder[];
+  }
+
+  try {
+    const parsed = JSON.parse(rows[0]?.value ?? '[]');
+    if (Array.isArray(parsed)) {
+      return parsed as Reminder[];
+    }
+  } catch {
+    return [] as Reminder[];
+  }
+
+  return [] as Reminder[];
+}
+
+async function saveReminderState(tenantId: string, agentId: string, reminders: Reminder[]) {
+  const db = getDb();
+  await db
+    .insert(memoryKv)
+    .values({
+      tenantId,
+      agentId,
+      key: 'reminders',
+      value: JSON.stringify(reminders),
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: [memoryKv.tenantId, memoryKv.agentId, memoryKv.key],
+      set: {
+        value: JSON.stringify(reminders),
+        updatedAt: new Date(),
+      },
+    });
+}
+
 export const remindersTool: ToolDef = {
   name: 'reminders',
   shortDescription: 'Create and manage reminders',
   longDescription:
-    'Set, read, update, and remove reminders that can later be backed by scheduler or cron tooling.',
+    'Set, read, update, and remove reminders stored per tenant/agent. Uses in-memory storage backed by memory_kv.',
   commands: [
     {
       name: 'set',
@@ -43,13 +91,13 @@ export const remindersTool: ToolDef = {
         '{"name":"reminders.set","args":{"reminder":{"name":"Weekly review","description":"Plan next week","dueAt":"2026-02-07T09:00:00Z","repeats":true,"repeatRule":"weekly","prompt":"Time for the weekly review."}}}',
       argsSchema: remindersSetArgs,
       classification: 'WRITE',
-      handler: async (_ctx, args) => {
+      handler: async (ctx, args) => {
         const { reminder } = remindersSetArgs.parse(args);
-        return {
-          success: false,
-          error: 'Not implemented yet',
-          reminder,
-        };
+        const list = await loadReminderState(ctx.tenantId, ctx.agentId);
+        const filtered = list.filter((item) => item.name !== reminder.name);
+        filtered.push(reminder);
+        await saveReminderState(ctx.tenantId, ctx.agentId, filtered);
+        return { success: true, reminder };
       },
     },
     {
@@ -59,14 +107,11 @@ export const remindersTool: ToolDef = {
       usageExample: '{"name":"reminders.get","args":{"name":"Weekly review"}}',
       argsSchema: remindersGetArgs,
       classification: 'READ',
-      handler: async (_ctx, args) => {
+      handler: async (ctx, args) => {
         const { name } = remindersGetArgs.parse(args);
-        return {
-          success: false,
-          error: 'Not implemented yet',
-          name,
-          reminders: [],
-        };
+        const list = await loadReminderState(ctx.tenantId, ctx.agentId);
+        const reminders = name ? list.filter((item) => item.name === name) : list;
+        return { success: true, reminders };
       },
     },
     {
@@ -77,14 +122,20 @@ export const remindersTool: ToolDef = {
         '{"name":"reminders.update","args":{"name":"Weekly review","updates":{"dueAt":"2026-02-07T10:00:00Z"}}}',
       argsSchema: remindersUpdateArgs,
       classification: 'WRITE',
-      handler: async (_ctx, args) => {
+      handler: async (ctx, args) => {
         const { name, updates } = remindersUpdateArgs.parse(args);
-        return {
-          success: false,
-          error: 'Not implemented yet',
-          name,
-          updates,
-        };
+        const list = await loadReminderState(ctx.tenantId, ctx.agentId);
+        let updated: Reminder | null = null;
+        const next = list.map((item) => {
+          if (item.name !== name) return item;
+          updated = { ...item, ...updates, name: item.name } as Reminder;
+          return updated;
+        });
+        if (!updated) {
+          return { success: false, error: 'Reminder not found' };
+        }
+        await saveReminderState(ctx.tenantId, ctx.agentId, next);
+        return { success: true, reminder: updated };
       },
     },
     {
@@ -94,13 +145,15 @@ export const remindersTool: ToolDef = {
       usageExample: '{"name":"reminders.remove","args":{"name":"Weekly review"}}',
       argsSchema: remindersRemoveArgs,
       classification: 'DESTRUCT',
-      handler: async (_ctx, args) => {
+      handler: async (ctx, args) => {
         const { name } = remindersRemoveArgs.parse(args);
-        return {
-          success: false,
-          error: 'Not implemented yet',
-          name,
-        };
+        const list = await loadReminderState(ctx.tenantId, ctx.agentId);
+        const next = list.filter((item) => item.name !== name);
+        if (next.length === list.length) {
+          return { success: false, error: 'Reminder not found' };
+        }
+        await saveReminderState(ctx.tenantId, ctx.agentId, next);
+        return { success: true, name };
       },
     },
   ],

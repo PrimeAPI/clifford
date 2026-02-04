@@ -1,26 +1,42 @@
-import type { ToolDef, ToolCommandDef, Plugin } from '@clifford/sdk';
-import { DEFAULT_TOOLS } from '@clifford/tools';
+import type { ToolDef, ToolCommandDef, Plugin, Logger } from '@clifford/sdk';
+import { NATIVE_TOOLS } from '@clifford/tools';
+import { getPlugin, getAllPlugins } from '@clifford/plugins';
 
 export class ToolRegistry {
   private tools = new Map<string, ToolDef>();
+  private logger?: Logger;
 
-  constructor() {
+  constructor(logger?: Logger) {
+    this.logger = logger;
     // Register core tools
-    for (const tool of DEFAULT_TOOLS) {
+    for (const tool of NATIVE_TOOLS) {
       this.tools.set(tool.name, tool);
     }
   }
 
-  async loadPlugins(pluginNames: string[]): Promise<void> {
+  async loadPlugins(pluginNames: string[]): Promise<string[]> {
+    const missing: string[] = [];
     for (const pluginName of pluginNames) {
-      await this.loadPlugin(pluginName);
+      try {
+        await this.loadPlugin(pluginName);
+      } catch (err) {
+        missing.push(pluginName);
+      }
+    }
+    return missing;
+  }
+
+  async loadAllPlugins(): Promise<void> {
+    const plugins = getAllPlugins();
+    for (const plugin of plugins) {
+      for (const tool of plugin.tools) {
+        this.tools.set(tool.name, tool);
+      }
     }
   }
 
   private async loadPlugin(pluginName: string): Promise<void> {
-    // In production, this would dynamic import based on pluginName
-    let plugin: Plugin | null = null;
-
+    const plugin: Plugin | undefined = getPlugin(pluginName);
     if (!plugin) {
       throw new Error(`Plugin not found: ${pluginName}`);
     }
@@ -41,5 +57,9 @@ export class ToolRegistry {
 
   getAllTools(): ToolDef[] {
     return Array.from(this.tools.values());
+  }
+
+  listTools(): ToolDef[] {
+    return this.getAllTools();
   }
 }

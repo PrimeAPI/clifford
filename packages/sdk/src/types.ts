@@ -17,6 +17,8 @@ export interface ToolDef {
   name: string;
   shortDescription: string;
   longDescription: string;
+  pinned?: boolean;
+  important?: boolean;
   completeRequirement?: string;
   commands: ToolCommandDef[];
 }
@@ -29,6 +31,9 @@ export interface ToolContext {
   runId: string;
   db: unknown; // Typed properly in db package
   logger: Logger;
+  toolResolver?: ToolResolver;
+  userId?: string;
+  channelId?: string;
 }
 
 type LogFn = {
@@ -57,6 +62,11 @@ export interface ToolResult {
   error?: string;
 }
 
+export interface ToolResolver {
+  listTools: () => ToolDef[];
+  getTool: (name: string) => ToolDef | undefined;
+}
+
 // Plugin Interface
 export interface Plugin {
   id: string;
@@ -78,7 +88,13 @@ export interface PolicyContext {
 
 // Run Types
 export type RunStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-export type StepType = 'message' | 'tool_call' | 'tool_result';
+export type StepType =
+  | 'message'
+  | 'tool_call'
+  | 'tool_result'
+  | 'assistant_message'
+  | 'output_update'
+  | 'finish';
 export type StepStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 export interface Run {
@@ -132,6 +148,10 @@ export function describeToolSummary(tool: ToolDef): string {
   );
 
   return [`${tool.name}: ${tool.shortDescription}`, 'Commands:', ...commandLines].join('\n');
+}
+
+export function describeToolBrief(tool: ToolDef): string {
+  return `${tool.name}: ${tool.shortDescription}`;
 }
 
 export function describeToolDetails(tool: ToolDef): string {

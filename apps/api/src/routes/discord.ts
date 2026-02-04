@@ -1,9 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getDb, discordConnections, channels, messages, contexts } from '@clifford/db';
+import { getDb, discordConnections, channels, messages, contexts, agents, runs } from '@clifford/db';
 import { eq, and, sql, desc } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
-import { enqueueMessage, enqueueMemoryWrite } from '../queue.js';
+import { enqueueRun, enqueueMemoryWrite } from '../queue.js';
 import { ensureActiveContext, createContext } from '../context.js';
 import { config } from '../config.js';
 
@@ -352,10 +352,37 @@ export async function discordRoutes(app: FastifyInstance) {
           .where(eq(contexts.id, contextId));
       }
 
-      await enqueueMessage({
-        type: 'message',
-        messageId,
+      const [agent] = allowlistedChannel.agentId
+        ? await db.select().from(agents).where(eq(agents.id, allowlistedChannel.agentId)).limit(1)
+        : await db.select().from(agents).where(eq(agents.enabled, true)).limit(1);
+      if (!agent) {
+        return reply.status(500).send({ error: 'No enabled agent found' });
+      }
+
+      const runId = randomUUID();
+      await db.insert(runs).values({
+        id: runId,
+        tenantId: agent.tenantId,
+        agentId: agent.id,
+        userId: allowlistedChannel.userId,
+        channelId: allowlistedChannel.id,
+        contextId,
+        inputText: body.content,
+        outputText: '',
+        status: 'pending',
       });
+
+      await enqueueRun({
+        type: 'run',
+        runId,
+        tenantId: agent.tenantId,
+        agentId: agent.id,
+      });
+
+      app.log.info(
+        { runId, agentId: agent.id, channelId: allowlistedChannel.id },
+        'Run enqueued (discord allowlist)'
+      );
 
       if (shouldPersistConfig && nextConfig) {
         await db
@@ -460,10 +487,34 @@ export async function discordRoutes(app: FastifyInstance) {
         .where(eq(contexts.id, contextId));
     }
 
-    await enqueueMessage({
-      type: 'message',
-      messageId,
+    const [agent] = resolvedChannel?.agentId
+      ? await db.select().from(agents).where(eq(agents.id, resolvedChannel.agentId)).limit(1)
+      : await db.select().from(agents).where(eq(agents.enabled, true)).limit(1);
+    if (!agent) {
+      return reply.status(500).send({ error: 'No enabled agent found' });
+    }
+
+    const runId = randomUUID();
+    await db.insert(runs).values({
+      id: runId,
+      tenantId: agent.tenantId,
+      agentId: agent.id,
+      userId: connection.userId,
+      channelId,
+      contextId,
+      inputText: body.content,
+      outputText: '',
+      status: 'pending',
     });
+
+    await enqueueRun({
+      type: 'run',
+      runId,
+      tenantId: agent.tenantId,
+      agentId: agent.id,
+    });
+
+    app.log.info({ runId, agentId: agent.id, channelId }, 'Run enqueued (discord)');
 
     app.log.info({ channelId, discordUserId: body.discordUserId }, 'Discord message received');
 

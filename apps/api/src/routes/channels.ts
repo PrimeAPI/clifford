@@ -22,12 +22,14 @@ async function ensureDemoUser(db: ReturnType<typeof getDb>, userId: string) {
 const createChannelSchema = z.object({
   type: z.enum(['web', 'discord']),
   name: z.string().min(1),
+  agentId: z.string().uuid().optional(),
   config: z.record(z.unknown()).optional(),
 });
 
 const updateChannelSchema = z.object({
   name: z.string().min(1).optional(),
   enabled: z.boolean().optional(),
+  agentId: z.string().uuid().nullable().optional(),
   config: z.record(z.unknown()).optional(),
 });
 
@@ -87,6 +89,7 @@ export async function channelRoutes(app: FastifyInstance) {
       .values({
         id: randomUUID(),
         userId,
+        agentId: body.agentId,
         type: body.type,
         name: body.name,
         config: body.config as any,

@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils';
 interface LlmSettings {
   provider: string;
   model: string;
+  fallbackModel: string | null;
   hasApiKey: boolean;
   apiKeyLast4: string | null;
 }
@@ -25,6 +26,7 @@ export default function SettingsPage() {
 
   const [llmSettings, setLlmSettings] = useState<LlmSettings | null>(null);
   const [llmModel, setLlmModel] = useState('gpt-4o-mini');
+  const [llmFallbackModel, setLlmFallbackModel] = useState('');
   const [llmApiKey, setLlmApiKey] = useState('');
   const [savingLlm, setSavingLlm] = useState(false);
   const [loadingLlm, setLoadingLlm] = useState(true);
@@ -51,6 +53,7 @@ export default function SettingsPage() {
       const data = (await res.json()) as LlmSettings;
       setLlmSettings(data);
       setLlmModel(data.model || 'gpt-4o-mini');
+      setLlmFallbackModel(data.fallbackModel ?? '');
     } catch (err) {
       console.error('Failed to load LLM settings:', err);
     } finally {
@@ -61,9 +64,15 @@ export default function SettingsPage() {
   const saveLlmSettings = async () => {
     setSavingLlm(true);
     try {
-      const payload: { provider?: string; model?: string; apiKey?: string | null } = {
+      const payload: {
+        provider?: string;
+        model?: string;
+        fallbackModel?: string | null;
+        apiKey?: string | null;
+      } = {
         provider: 'openai',
         model: llmModel.trim(),
+        fallbackModel: llmFallbackModel.trim() || null,
       };
 
       if (llmApiKey.trim()) {
@@ -288,6 +297,21 @@ export default function SettingsPage() {
               placeholder="gpt-4o-mini"
               disabled={loadingLlm}
             />
+          </div>
+          <div className="space-y-2">
+            <label htmlFor="llm-fallback-model" className="text-sm font-medium">
+              Fallback Model
+            </label>
+            <Input
+              id="llm-fallback-model"
+              value={llmFallbackModel}
+              onChange={(e) => setLlmFallbackModel(e.target.value)}
+              placeholder="gpt-4o-mini"
+              disabled={loadingLlm}
+            />
+            <p className="text-xs text-muted-foreground">
+              Used if the default model errors or rate limits.
+            </p>
           </div>
           <div className="space-y-2">
             <label htmlFor="llm-key" className="text-sm font-medium">

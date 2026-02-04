@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@clifford/db": "workspace:*",
+    "@clifford/plugins": "workspace:*",
     "@clifford/policy": "workspace:*",
     "@clifford/sdk": "workspace:*",
     "@clifford/tools": "workspace:*",

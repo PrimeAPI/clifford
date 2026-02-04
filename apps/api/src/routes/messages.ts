@@ -1,9 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getDb, messages, channels, contexts } from '@clifford/db';
+import { getDb, messages, channels, contexts, agents, runs } from '@clifford/db';
 import { eq, and, desc } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
-import { enqueueMessage } from '../queue.js';
+import { enqueueRun } from '../queue.js';
 import { ensureActiveContext } from '../context.js';
 
 const sendMessageSchema = z.object({
@@ -153,10 +153,45 @@ export async function messageRoutes(app: FastifyInstance) {
     }
 
     if (message) {
-      await enqueueMessage({
-        type: 'message',
-        messageId: message.id,
+      const [agent] = channel?.agentId
+        ? await db.select().from(agents).where(eq(agents.id, channel.agentId)).limit(1)
+        : await db.select().from(agents).where(eq(agents.enabled, true)).limit(1);
+      if (!agent) {
+        await db.insert(messages).values({
+          id: randomUUID(),
+          userId,
+          channelId: body.channelId,
+          contextId,
+          content: 'No enabled agent is configured for this channel.',
+          direction: 'outbound',
+          deliveryStatus: 'delivered',
+          deliveredAt: new Date(),
+          metadata: JSON.stringify({ error: true, replyTo: message.id }),
+        });
+        return reply.status(500).send({ error: 'No enabled agent found' });
+      }
+
+      const runId = randomUUID();
+      await db.insert(runs).values({
+        id: runId,
+        tenantId: agent.tenantId,
+        agentId: agent.id,
+        userId,
+        channelId: body.channelId,
+        contextId,
+        inputText: body.content,
+        outputText: '',
+        status: 'pending',
       });
+
+      await enqueueRun({
+        type: 'run',
+        runId,
+        tenantId: agent.tenantId,
+        agentId: agent.id,
+      });
+
+      app.log.info({ runId, agentId: agent.id, channelId: body.channelId }, 'Run enqueued');
     }
 
     app.log.info({ messageId: message?.id, channelId: body.channelId }, 'Message sent');

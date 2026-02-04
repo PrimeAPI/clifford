@@ -198,6 +198,9 @@ importers:
       '@clifford/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@clifford/plugins':
+        specifier: workspace:*
+        version: link:../../packages/plugins
       '@clifford/policy':
         specifier: workspace:*
         version: link:../../packages/policy
@@ -257,6 +260,16 @@ importers:
       tsx:
         specifier: ^4.19.2
         version: 4.21.0
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/plugins:
+    dependencies:
+      '@clifford/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+    devDependencies:
       typescript:
         specifier: ^5.7.2
         version: 5.9.3

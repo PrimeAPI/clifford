@@ -4,7 +4,7 @@ import { getDb, memoryItems, messages, userSettings } from '@clifford/db';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { config } from './config.js';
 import { decryptSecret } from './crypto.js';
-import { callOpenAI, type OpenAIMessage } from './openai-client.js';
+import { callOpenAIWithFallback, type OpenAIMessage } from './openai-client.js';
 import { z } from 'zod';
 
 const LEVEL_LIMITS = [
@@ -87,6 +87,7 @@ export async function processMemoryWrite(job: Job<MemoryWriteJob>, logger: Logge
 
   const provider = settings.llmProvider || 'openai';
   const model = settings.llmModel || 'gpt-4o-mini';
+  const fallbackModel = settings.llmFallbackModel || null;
 
   const segment =
     segmentMessages && segmentMessages.length > 0
@@ -139,7 +140,13 @@ export async function processMemoryWrite(job: Job<MemoryWriteJob>, logger: Logge
 
   let responseText = '';
   try {
-    responseText = await callOpenAI(apiKey, model, messagesForModel, { temperature: 0 });
+    responseText = await callOpenAIWithFallback(
+      apiKey,
+      model,
+      fallbackModel,
+      messagesForModel,
+      { temperature: 0 }
+    );
   } catch (err) {
     logger.error({ err, contextId, userId }, 'Memory writer model call failed');
     return { ok: false, reason: 'model_call_failed' };

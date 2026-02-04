@@ -1,12 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getDb, runs, runSteps, agents } from '@clifford/db';
+import { getDb, runs, runSteps, agents, channels } from '@clifford/db';
 import { eq, desc, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { enqueueRun } from '../queue.js';
 
 const createRunSchema = z.object({
   agentId: z.string().uuid(),
+  channelId: z.string().uuid(),
+  contextId: z.string().uuid().optional(),
   inputText: z.string().min(1),
 });
 
@@ -39,7 +41,11 @@ export async function runRoutes(app: FastifyInstance) {
         id: runs.id,
         agentId: runs.agentId,
         agentName: agents.name,
+        channelId: runs.channelId,
+        userId: runs.userId,
+        contextId: runs.contextId,
         inputText: runs.inputText,
+        outputText: runs.outputText,
         status: runs.status,
         createdAt: runs.createdAt,
         updatedAt: runs.updatedAt,
@@ -66,16 +72,34 @@ export async function runRoutes(app: FastifyInstance) {
     if (!tenantId) {
       return reply.status(400).send({ error: 'Missing X-Tenant-Id header' });
     }
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(400).send({ error: 'Missing X-User-Id header' });
+    }
 
     const body = createRunSchema.parse(req.body);
     const db = getDb();
+
+    const [channel] = await db
+      .select()
+      .from(channels)
+      .where(eq(channels.id, body.channelId))
+      .limit(1);
+
+    if (!channel || channel.userId !== userId) {
+      return reply.status(404).send({ error: 'Channel not found' });
+    }
 
     const runId = randomUUID();
     await db.insert(runs).values({
       id: runId,
       tenantId,
       agentId: body.agentId,
+      userId,
+      channelId: body.channelId,
+      contextId: body.contextId ?? null,
       inputText: body.inputText,
+      outputText: '',
       status: 'pending',
     });
 
@@ -102,7 +126,11 @@ export async function runRoutes(app: FastifyInstance) {
         id: runs.id,
         agentId: runs.agentId,
         agentName: agents.name,
+        channelId: runs.channelId,
+        userId: runs.userId,
+        contextId: runs.contextId,
         inputText: runs.inputText,
+        outputText: runs.outputText,
         status: runs.status,
         createdAt: runs.createdAt,
         updatedAt: runs.updatedAt,

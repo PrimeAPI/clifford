@@ -9,6 +9,7 @@ import { encryptSecret } from '../crypto.js';
 const llmSettingsSchema = z.object({
   provider: z.enum(['openai']).optional(),
   model: z.string().min(1).optional(),
+  fallbackModel: z.string().min(1).optional().nullable(),
   apiKey: z.string().optional().nullable(),
 });
 
@@ -78,6 +79,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     return {
       provider: settings?.llmProvider ?? 'openai',
       model: settings?.llmModel ?? 'gpt-4o-mini',
+      fallbackModel: settings?.llmFallbackModel ?? null,
       hasApiKey: Boolean(settings?.llmApiKeyEncrypted),
       apiKeyLast4: settings?.llmApiKeyLast4 ?? null,
     };
@@ -104,6 +106,10 @@ export async function settingsRoutes(app: FastifyInstance) {
 
     if (body.model) {
       updates.llmModel = body.model;
+    }
+
+    if (body.fallbackModel !== undefined) {
+      updates.llmFallbackModel = body.fallbackModel?.trim() || null;
     }
 
     if (body.apiKey !== undefined) {
@@ -135,6 +141,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     return {
       provider: merged?.llmProvider ?? 'openai',
       model: merged?.llmModel ?? 'gpt-4o-mini',
+      fallbackModel: merged?.llmFallbackModel ?? null,
       hasApiKey: Boolean(merged?.llmApiKeyEncrypted),
       apiKeyLast4: merged?.llmApiKeyLast4 ?? null,
     };

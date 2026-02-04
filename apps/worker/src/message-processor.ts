@@ -6,7 +6,7 @@ import { randomUUID } from 'crypto';
 import { config } from './config.js';
 import { enqueueDelivery, enqueueMemoryWrite } from './queues.js';
 import { decryptSecret } from './crypto.js';
-import { callOpenAI, type OpenAIMessage } from './openai-client.js';
+import { callOpenAIWithFallback, type OpenAIMessage } from './openai-client.js';
 
 const DEFAULT_SYSTEM_PROMPT =
   'You are Clifford, a very skilled and highly complex AI-Assistent!';
@@ -80,6 +80,7 @@ export async function processMessage(job: Job<MessageJob>, logger: Logger) {
 
     const provider = settings.llmProvider || 'openai';
     const model = settings.llmModel || 'gpt-4o-mini';
+    const fallbackModel = settings.llmFallbackModel || null;
 
     const [user] = await db.select().from(users).where(eq(users.id, message.userId)).limit(1);
     const contextId = message.contextId ?? channel.activeContextId ?? null;
@@ -166,7 +167,7 @@ export async function processMessage(job: Job<MessageJob>, logger: Logger) {
     let responseText = '';
 
     if (provider === 'openai') {
-      responseText = await callOpenAI(apiKey, model, conversation);
+      responseText = await callOpenAIWithFallback(apiKey, model, fallbackModel, conversation);
     } else {
       throw new Error(`Unsupported LLM provider: ${provider}`);
     }
