@@ -9,6 +9,7 @@ Autonomous agent platform built with TypeScript, Node.js, and modern web technol
 - **Postgres** (System of Record)
 - **Redis** (BullMQ queues + locks)
 - **MinIO** (S3-compatible file storage)
+- **Architecture spec**: see `docs/architecture.md`
 
 ### Services (apps)
 

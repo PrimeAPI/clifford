@@ -52,6 +52,11 @@ type RunCommand =
       type: 'note';
       category: 'requirements' | 'plan' | 'artifact' | 'validation';
       content: string;
+    }
+  | {
+      type: 'set_run_limits';
+      maxIterations: number;
+      reason?: string;
     };
 type SubagentSpec = {
   id?: string;
@@ -85,7 +90,8 @@ type TranscriptEntry =
   | { type: 'output_update'; output: string; mode: 'replace' | 'append' }
   | { type: 'decision'; content: string; importance?: 'low' | 'normal' | 'high' }
   | { type: 'note'; category: 'requirements' | 'plan' | 'artifact' | 'validation'; content: string }
-  | { type: 'system_note'; content: string };
+  | { type: 'system_note'; content: string }
+  | { type: 'validation_missing'; detail: string };
 
 export async function processRun(job: Job<RunJob>, logger: Logger) {
   const { runId, tenantId, agentId } = job.data;
@@ -233,9 +239,10 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       '4) {"type":"finish","output":"...","mode":"replace"|"append"}\n' +
       '5) {"type":"decision","content":"...","importance":"low"|"normal"|"high"}\n' +
       '6) {"type":"note","category":"requirements"|"plan"|"artifact"|"validation","content":"..."}\n' +
-      '7) {"type":"spawn_subagent","subagent":{"profile":"...","task":"...","tools":["..."],"context":[...]}}\n' +
-      '8) {"type":"spawn_subagents","subagents":[{"profile":"...","task":"...","tools":["..."],"context":[...]}]}\n' +
-      '9) {"type":"sleep","reason":"...","wakeAt":"ISO-8601","delaySeconds":123,"cron":"*/5 * * * *"}\n' +
+      '7) {"type":"set_run_limits","maxIterations":12,"reason":"..."}\n' +
+      '8) {"type":"spawn_subagent","subagent":{"profile":"...","task":"...","tools":["..."],"context":[...]}}\n' +
+      '9) {"type":"spawn_subagents","subagents":[{"profile":"...","task":"...","tools":["..."],"context":[...]}]}\n' +
+      '10) {"type":"sleep","reason":"...","wakeAt":"ISO-8601","delaySeconds":123,"cron":"*/5 * * * *"}\n' +
       'DEFAULT: answer directly and finish in a single step when possible. ' +
       'Only use tool_call if it is necessary to answer correctly. ' +
       'Avoid multi-step iteration for simple questions. ' +
@@ -249,6 +256,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       'Use finish when the task is complete; the output will be sent to the user. ' +
       'Use decision to record brief coordinator reasoning/justifications; it is shown in the coordinator view but not sent to the user. ' +
       'Use note to record requirements, plan, artifacts, and validation summaries; it is shown in the task view. ' +
+      'If you emit a plan note in a coordinator run, you MUST set_run_limits next. ' +
+      'If required data is missing or a tool returns success:false, you MUST finish with a limitation statement and best-effort output. Do not keep iterating. ' +
+      'Never claim a multi-day forecast unless the tool result includes daily[]. ' +
       'When unsure or planning multi-step work, emit a decision before taking actions. ' +
       'agentLevel indicates nesting depth: 0 = coordinator, 1 = subagent, 2 = subsubagent. ' +
       'If agentLevel >= 2, you MUST NOT spawn any subagents. ' +
@@ -292,6 +302,23 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       artifact: 0,
       validation: 0,
     };
+    const systemNoteCache = new Set<string>();
+    const appendSystemNoteOnce = (content: string) => {
+      if (systemNoteCache.has(content)) return false;
+      systemNoteCache.add(content);
+      transcript.push({ type: 'system_note', content });
+      return true;
+    };
+    const hardCap = Math.max(1, config.runMaxIterationsHardCap);
+    let runIterationLimit = Math.min(Math.max(1, config.runMaxIterations), hardCap);
+    let runLimitsSet = false;
+    let limitationRequired = false;
+    let limitationReason: string | null = null;
+    const recentIterations: Array<{
+      hadToolCall: boolean;
+      outputSnapshot: string;
+      commandSignature: string | null;
+    }> = [];
     const conversation =
       run.kind === 'coordinator'
         ? await loadConversation(db, run.channelId, run.contextId ?? null, undefined)
@@ -306,6 +333,35 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       ? 'Hey! How can I help?'
       : "Sorry, I got stuck while planning. Could you rephrase or be more specific?";
 
+    const finishRun = async (message: string, reason: string) => {
+      await db
+        .update(runs)
+        .set({ outputText: message, status: 'completed', updatedAt: new Date() })
+        .where(eq(runs.id, runId));
+      await appendRunStep(db, {
+        runId,
+        seq: stepSeq++,
+        type: 'finish',
+        resultJson: { output: message, reason },
+      });
+      if (run.kind !== 'subagent') {
+        await sendRunMessage({
+          db,
+          userId: run.userId,
+          channelId: run.channelId,
+          contextId: run.contextId ?? null,
+          content: message,
+          logger,
+          runId,
+          runKind: run.kind ?? 'coordinator',
+        });
+      }
+      logger.info('Run completed', { runId, reason });
+      if (run.parentRunId) {
+        await wakeParentRun(db, run.parentRunId, tenantId, agentId);
+      }
+    };
+
     const forceFinishIfStuck = async (iteration: number, reason: string) => {
       const hasToolCalls = transcript.some((entry) => entry.type === 'tool_call');
       const shouldForce =
@@ -315,36 +371,46 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         !hasToolCalls;
       if (!shouldForce) return false;
 
-      await db
-        .update(runs)
-        .set({ outputText: fallbackMessage, status: 'completed', updatedAt: new Date() })
-        .where(eq(runs.id, runId));
-      await appendRunStep(db, {
-        runId,
-        seq: stepSeq++,
-        type: 'finish',
-        resultJson: { output: fallbackMessage, reason },
-      });
-      if (run.kind !== 'subagent') {
-        await sendRunMessage({
-          db,
-          userId: run.userId,
-          channelId: run.channelId,
-          contextId: run.contextId ?? null,
-          content: fallbackMessage,
-          logger,
-          runId,
-          runKind: run.kind ?? 'coordinator',
-        });
-      }
+      await finishRun(fallbackMessage, reason);
       logger.info('Run completed after planning stall', { runId, iteration, reason });
-      if (run.parentRunId) {
-        await wakeParentRun(db, run.parentRunId, tenantId, agentId);
-      }
       return true;
     };
 
-    for (let iteration = 0; iteration < config.runMaxIterations; iteration += 1) {
+    const recordIterationAndCheck = async (commandSignature: string | null, hadToolCall: boolean) => {
+      const outputSnapshot = (outputText || lastAssistantMessage || '').trim();
+      recentIterations.push({ hadToolCall, outputSnapshot, commandSignature });
+      if (recentIterations.length > 3) {
+        recentIterations.shift();
+      }
+      if (recentIterations.length < 3) return false;
+
+      const noToolCalls = recentIterations.every((entry) => !entry.hadToolCall);
+      const sameOutput = recentIterations.every(
+        (entry) => entry.outputSnapshot === recentIterations[0].outputSnapshot
+      );
+      const signatures = new Set(recentIterations.map((entry) => entry.commandSignature ?? ''));
+      const sameCommand = signatures.size <= 1;
+
+      if (noToolCalls && sameOutput && sameCommand) {
+        const bestEffort =
+          outputSnapshot || 'I need more details or different tools to make progress.';
+        const message =
+          "I'm not making progress because I'm repeating the same action without new data. " +
+          `Here is the best I can do with available information:\n${bestEffort}`;
+        await finishRun(message, 'pointless_loop');
+        return true;
+      }
+
+      return false;
+    };
+
+    for (let iteration = 0; iteration < hardCap; iteration += 1) {
+      const budgetExceeded = iteration >= runIterationLimit;
+      if (budgetExceeded) {
+        const notice =
+          'Budget reached. Reflect on progress; if stuck, finish with best-effort output and a brief explanation. Otherwise set_run_limits(maxIterations) with a higher limit (<= hard cap) and a brief reason.';
+        appendSystemNoteOnce(notice);
+      }
       const transcriptWindow = trimTranscript(transcript, config.runTranscriptLimit, config.runTranscriptTokenLimit);
 
       const subagentResults =
@@ -422,10 +488,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         if (command) {
           break;
         }
-        transcript.push({
-          type: 'system_note',
-          content: `Invalid JSON response received. Please reply with a single valid JSON command object only.`,
-        });
+        appendSystemNoteOnce(
+          'Invalid JSON response received. Please reply with a single valid JSON command object only.'
+        );
       }
 
       if (!command) {
@@ -448,14 +513,71 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         throw new Error('LLM returned invalid JSON for run command');
       }
 
+      if (
+        run.kind === 'coordinator' &&
+        noteCounts.plan > 0 &&
+        !runLimitsSet &&
+        iteration >= 2 &&
+        command.type !== 'set_run_limits'
+      ) {
+        appendSystemNoteOnce('You must set_run_limits(maxIterations) now or you cannot proceed.');
+        if (await recordIterationAndCheck('blocked:set_run_limits', false)) {
+          return;
+        }
+        continue;
+      }
+
+      if (budgetExceeded && command.type !== 'set_run_limits' && command.type !== 'finish') {
+        appendSystemNoteOnce(
+          'Budget reached. Reflect on progress; if stuck, finish with best-effort output and a brief explanation. Otherwise set_run_limits(maxIterations) with a higher limit (<= hard cap) and a brief reason.'
+        );
+        if (await recordIterationAndCheck('blocked:budget', false)) {
+          return;
+        }
+        continue;
+      }
+
+      if (limitationRequired && command.type !== 'finish') {
+        appendSystemNoteOnce(
+          `A required tool failed (${limitationReason ?? 'unknown_error'}). You must finish now with a limitation statement and best-effort output.`
+        );
+        if (await recordIterationAndCheck('blocked:limitation', false)) {
+          return;
+        }
+        continue;
+      }
+
+      if (command.type === 'set_run_limits') {
+        const requested = Number(command.maxIterations);
+        if (!Number.isFinite(requested) || requested <= 0) {
+          appendSystemNoteOnce('set_run_limits requires maxIterations to be a positive number.');
+          continue;
+        }
+        const clamped = Math.max(1, Math.min(hardCap, Math.floor(requested)));
+        runIterationLimit = clamped;
+        runLimitsSet = true;
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: { event: 'set_run_limits', maxIterations: clamped, reason: command.reason ?? null },
+        });
+        appendSystemNoteOnce(`Run limits set to ${clamped} iterations.`);
+        if (await recordIterationAndCheck(`set_run_limits:${clamped}`, false)) {
+          return;
+        }
+        continue;
+      }
+
       if (command.type === 'tool_call') {
         if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
-          transcript.push({
-            type: 'system_note',
-            content:
-              'Before taking actions, emit note(category="requirements") and note(category="plan") summarizing goals, constraints, and plan.',
-          });
+          appendSystemNoteOnce(
+            'Before taking actions, emit note(category="requirements") and note(category="plan") summarizing goals, constraints, and plan.'
+          );
           if (await forceFinishIfStuck(iteration, 'planning_required')) {
+            return;
+          }
+          if (await recordIterationAndCheck('blocked:planning_required', false)) {
             return;
           }
           continue;
@@ -541,35 +663,16 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           };
           if (count > maxRetries) {
             const exposeErrors = Boolean((toolConfig as { expose_errors?: unknown }).expose_errors);
-            const errorText = exposeErrors && result.error ? ` Error: ${String(result.error)}` : '';
-            const message = `Sorry, the tool \"${toolCall.name}\" failed and I can't continue. Please try again.${errorText}`;
-            await db
-              .update(runs)
-              .set({ outputText: message, status: 'failed', updatedAt: new Date() })
-              .where(eq(runs.id, runId));
-            await appendRunStep(db, {
-              runId,
-              seq: stepSeq++,
-              type: 'finish',
-              resultJson: { output: message, reason: 'tool_failed' },
-            });
-            if (run.kind !== 'subagent') {
-              await sendRunMessage({
-                db,
-                userId: run.userId,
-                channelId: run.channelId,
-                contextId: run.contextId ?? null,
-                content: message,
-                logger,
-                runId,
-                runKind: run.kind ?? 'coordinator',
-              });
-            }
-            if (run.parentRunId) {
-              await wakeParentRun(db, run.parentRunId, tenantId, agentId);
-            }
-            return;
+            const errorText = exposeErrors && result.error ? String(result.error) : 'tool_failed';
+            limitationRequired = true;
+            limitationReason = errorText;
+            appendSystemNoteOnce(
+              `Tool \"${toolCall.name}\" failed (${errorText}). You must finish now with a limitation statement and best-effort output.`
+            );
           }
+        }
+        if (await recordIterationAndCheck(`tool_call:${toolCall.name}`, true)) {
+          return;
         }
         continue;
       }
@@ -668,17 +771,21 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           logger.info('Run completed after direct send_message', { runId });
           return;
         }
+        if (await recordIterationAndCheck('send_message', false)) {
+          return;
+        }
         continue;
       }
 
       if (command.type === 'set_output') {
         if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
-          transcript.push({
-            type: 'system_note',
-            content:
-              'Before producing output, emit note(category="requirements") and note(category="plan").',
-          });
+          appendSystemNoteOnce(
+            'Before producing output, emit note(category="requirements") and note(category="plan").'
+          );
           if (await forceFinishIfStuck(iteration, 'planning_required')) {
+            return;
+          }
+          if (await recordIterationAndCheck('blocked:planning_required', false)) {
             return;
           }
           continue;
@@ -703,6 +810,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           output: command.output,
           mode: command.mode ?? 'replace',
         });
+        if (await recordIterationAndCheck('set_output', false)) {
+          return;
+        }
         continue;
       }
 
@@ -719,6 +829,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         });
         transcript.push({ type: 'decision', content, importance: command.importance ?? 'normal' });
         if (await forceFinishIfStuck(iteration, 'decision_loop')) {
+          return;
+        }
+        if (await recordIterationAndCheck('decision', false)) {
           return;
         }
         continue;
@@ -743,31 +856,30 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         if (await forceFinishIfStuck(iteration, 'note_loop')) {
           return;
         }
+        if (await recordIterationAndCheck(`note:${command.category}`, false)) {
+          return;
+        }
         continue;
       }
 
       if (command.type === 'finish') {
         if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
-          transcript.push({
-            type: 'system_note',
-            content:
-              'Before finishing, emit note(category="requirements") and note(category="plan").',
-          });
+          appendSystemNoteOnce(
+            'Before finishing, emit note(category="requirements") and note(category="plan").'
+          );
           if (await forceFinishIfStuck(iteration, 'planning_required')) {
+            return;
+          }
+          if (await recordIterationAndCheck('blocked:planning_required', false)) {
             return;
           }
           continue;
         }
         if (noteCounts.validation === 0) {
           transcript.push({
-            type: 'system_note',
-            content:
-              'Before finishing, emit note(category="validation") confirming the output meets constraints.',
+            type: 'validation_missing',
+            detail: 'finish accepted without validation note',
           });
-          if (await forceFinishIfStuck(iteration, 'validation_required')) {
-            return;
-          }
-          continue;
         }
         if (command.output) {
           outputText = applyOutputUpdate(outputText, command.output, command.mode);
@@ -874,10 +986,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
               agentLevel,
             },
           });
-          transcript.push({
-            type: 'system_note',
-            content: 'Subagent spawning blocked at max depth (agentLevel >= 2). Continue without delegation.',
-          });
+          appendSystemNoteOnce(
+            'Subagent spawning blocked at max depth (agentLevel >= 2). Continue without delegation.'
+          );
           continue;
         }
         const subagents = command.type === 'spawn_subagent' ? [command.subagent] : command.subagents;
@@ -1061,32 +1172,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
     const finalOutput = outputText.trim() || lastAssistantMessage.trim();
     const rescueMessage = finalOutput || fallbackMessage;
-    await db
-      .update(runs)
-      .set({ outputText: rescueMessage, status: 'completed', updatedAt: new Date() })
-      .where(eq(runs.id, runId));
-    await appendRunStep(db, {
-      runId,
-      seq: stepSeq++,
-      type: 'finish',
-      resultJson: { output: rescueMessage, reason: 'max_iterations' },
-    });
-    if (run.kind !== 'subagent') {
-      await sendRunMessage({
-        db,
-        userId: run.userId,
-        channelId: run.channelId,
-        contextId: run.contextId ?? null,
-        content: rescueMessage,
-        logger,
-        runId,
-        runKind: run.kind ?? 'coordinator',
-      });
-    }
+    await finishRun(rescueMessage, 'max_iterations');
     logger.info('Run completed after max iterations', { runId });
-    if (run.parentRunId) {
-      await wakeParentRun(db, run.parentRunId, tenantId, agentId);
-    }
     return;
   } catch (err) {
     logger.error('Run failed', { runId, err });
@@ -1374,6 +1461,7 @@ function parseRunCommand(responseText: string): (RunCommand | SpawnCommand) | nu
         parsed.type === 'finish' ||
         parsed.type === 'decision' ||
         parsed.type === 'note' ||
+        parsed.type === 'set_run_limits' ||
         parsed.type === 'spawn_subagent' ||
         parsed.type === 'spawn_subagents' ||
         parsed.type === 'sleep'

@@ -14,6 +14,7 @@ export const config = {
   maxTurnsPerContext: parseInt(process.env.MAX_TURNS_PER_CONTEXT || '60', 10),
   memoryWriterMaxMessages: parseInt(process.env.MEMORY_WRITER_MAX_MESSAGES || '40', 10),
   runMaxIterations: parseInt(process.env.RUN_MAX_ITERATIONS || '20', 10),
+  runMaxIterationsHardCap: parseInt(process.env.RUN_MAX_ITERATIONS_HARD_CAP || '200', 10),
   runTranscriptLimit: parseInt(process.env.RUN_TRANSCRIPT_LIMIT || '50', 10),
   runTranscriptTokenLimit: parseInt(process.env.RUN_TRANSCRIPT_TOKEN_LIMIT || '1200', 10),
   runMaxJsonRetries: parseInt(process.env.RUN_MAX_JSON_RETRIES || '1', 10),
