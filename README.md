@@ -166,4 +166,4 @@ clifford/
 
 ## License
 
-MIT
+AGPLv3
