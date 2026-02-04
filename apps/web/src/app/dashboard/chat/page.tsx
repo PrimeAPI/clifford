@@ -1,11 +1,12 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Send, Globe, MessageSquare, Loader2 } from 'lucide-react';
 import { RunVisualization } from './run-visualization';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface Channel {
   id: string;
@@ -40,7 +41,39 @@ export default function ChatPage() {
   const [activeContextId, setActiveContextId] = useState<string | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastMessageIdRef = useRef<string | null>(null);
   const activeContext = contexts.find((context) => context.id === activeContextId) ?? contexts[0];
+
+  const markdownComponents = useMemo(
+    () => ({
+      a: ({ children, ...props }: any) => (
+        <a className="underline text-inherit" target="_blank" rel="noreferrer" {...props}>
+          {children}
+        </a>
+      ),
+      code: ({ inline, className, children, ...props }: any) => (
+        <code
+          className={
+            inline
+              ? 'rounded bg-muted px-1 py-0.5 text-[0.85em] text-inherit'
+              : `block rounded bg-muted p-3 text-xs text-inherit ${className ?? ''}`
+          }
+          {...props}
+        >
+          {children}
+        </code>
+      ),
+    }),
+    []
+  );
+
+  const renderMarkdown = (content: string) => (
+    <div className="prose prose-sm max-w-none text-inherit prose-p:text-inherit prose-strong:text-inherit prose-em:text-inherit prose-li:text-inherit prose-headings:text-inherit prose-code:text-inherit prose-a:text-inherit">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
 
   useEffect(() => {
     loadWebChannel();
@@ -61,6 +94,10 @@ export default function ChatPage() {
   }, [webChannel, activeContextId]);
 
   useEffect(() => {
+    const lastMessage = messages[messages.length - 1];
+    if (!lastMessage) return;
+    if (lastMessageIdRef.current === lastMessage.id) return;
+    lastMessageIdRef.current = lastMessage.id;
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
@@ -91,7 +128,24 @@ export default function ChatPage() {
       });
       const data = await res.json();
       const nextMessages = (data.messages || []).reverse();
-      setMessages(nextMessages);
+      setMessages((prev) => {
+        if (prev.length !== nextMessages.length) return nextMessages;
+        for (let i = 0; i < prev.length; i += 1) {
+          const prevMsg = prev[i];
+          const nextMsg = nextMessages[i];
+          if (
+            prevMsg.id !== nextMsg.id ||
+            prevMsg.content !== nextMsg.content ||
+            prevMsg.direction !== nextMsg.direction ||
+            prevMsg.createdAt !== nextMsg.createdAt ||
+            prevMsg.metadata !== nextMsg.metadata ||
+            prevMsg.contextId !== nextMsg.contextId
+          ) {
+            return nextMessages;
+          }
+        }
+        return prev;
+      });
 
       if (pendingReplyTo) {
         const hasReply = nextMessages.some((msg: Message) => {
@@ -204,7 +258,6 @@ export default function ChatPage() {
         setPendingReplyTo(data.message.id);
       }
 
-      setInput('');
       await loadMessages();
     } catch (err) {
       console.error('Failed to send message:', err);
@@ -213,7 +266,7 @@ export default function ChatPage() {
     }
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -299,13 +352,15 @@ export default function ChatPage() {
                       className={`max-w-[70%] rounded-lg px-4 py-2 ${
                         message.direction === 'inbound'
                           ? 'bg-primary text-primary-foreground'
-                          : 'bg-muted'
+                          : 'bg-muted text-foreground'
                       }`}
                     >
                       <p className="text-xs font-semibold uppercase tracking-wide opacity-70">
                         {message.direction === 'inbound' ? 'You' : 'Clifford'}
                       </p>
-                      <p className="mt-1 whitespace-pre-wrap break-words">{message.content}</p>
+                      <div className="mt-1 break-words">
+                        {renderMarkdown(message.content)}
+                      </div>
                       {message.direction !== 'inbound' && extractRunId(message.metadata) ? (
                         <RunVisualization runId={extractRunId(message.metadata)} />
                       ) : null}
@@ -361,11 +416,13 @@ export default function ChatPage() {
         {/* Input */}
         <div className="border-t border-border p-4">
           <div className="flex gap-2">
-            <Input
+            <textarea
+              className="flex min-h-[38px] w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               placeholder="Type a message..."
+              rows={2}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onKeyPress={handleKeyPress}
+              onKeyDown={handleKeyDown}
               disabled={loading}
             />
             <Button onClick={handleSend} disabled={loading || !input.trim()}>

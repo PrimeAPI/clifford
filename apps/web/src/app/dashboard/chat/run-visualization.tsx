@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -311,25 +311,49 @@ function useRunDetails(runId: string) {
   const [details, setDetails] = useState<RunDetails | null>(null);
   const [children, setChildren] = useState<RunSummary[]>([]);
   const [loading, setLoading] = useState(false);
+  const lastDetailsSignature = useRef<string>('');
+  const lastChildrenSignature = useRef<string>('');
 
   const reload = useCallback(async () => {
-    setLoading(true);
+    if (!details) {
+      setLoading(true);
+    }
     try {
       const res = await fetch(`/api/runs/${runId}`, {
         headers: { 'X-User-Id': DEMO_USER_ID, 'X-Tenant-Id': '00000000-0000-0000-0000-000000000000' },
       });
       const data = (await res.json()) as RunDetails;
-      setDetails(data);
+      const detailsSignature = [
+        data.run.id,
+        data.run.status,
+        data.run.updatedAt ?? '',
+        data.steps.length,
+        data.steps[data.steps.length - 1]?.id ?? '',
+        data.steps[data.steps.length - 1]?.seq ?? '',
+      ].join('|');
+      if (detailsSignature !== lastDetailsSignature.current) {
+        lastDetailsSignature.current = detailsSignature;
+        setDetails(data);
+      }
 
       const childRes = await fetch(`/api/runs/${runId}/children`, {
         headers: { 'X-User-Id': DEMO_USER_ID, 'X-Tenant-Id': '00000000-0000-0000-0000-000000000000' },
       });
       const childData = (await childRes.json()) as { children: RunSummary[] };
-      setChildren(childData.children || []);
+      const nextChildren = childData.children || [];
+      const childrenSignature = nextChildren
+        .map((child) => `${child.id}:${child.status}:${child.updatedAt ?? ''}`)
+        .join('|');
+      if (childrenSignature !== lastChildrenSignature.current) {
+        lastChildrenSignature.current = childrenSignature;
+        setChildren(nextChildren);
+      }
     } finally {
-      setLoading(false);
+      if (!details) {
+        setLoading(false);
+      }
     }
-  }, [runId]);
+  }, [runId, details]);
 
   useEffect(() => {
     void reload();
@@ -338,13 +362,16 @@ function useRunDetails(runId: string) {
   return { details, children, loading, reload };
 }
 
+type DialogState = {
+  title: string;
+  kind?: 'llm_request' | 'llm_response' | 'tool' | 'task' | 'generic';
+  content: unknown;
+};
+
 export function RunVisualization({ runId }: { runId: string }) {
-  const [dialog, setDialog] = useState<{
-    title: string;
-    kind?: 'llm_request' | 'llm_response' | 'tool' | 'task' | 'generic';
-    content: unknown;
-  } | null>(null);
+  const [dialogStack, setDialogStack] = useState<DialogState[]>([]);
   const { details, loading } = useRunDetails(runId);
+  const dialog = dialogStack.length > 0 ? dialogStack[dialogStack.length - 1] : null;
 
   const latestStep = details?.steps?.[details.steps.length - 1];
   const latestLabel = latestStep
@@ -365,6 +392,27 @@ export function RunVisualization({ runId }: { runId: string }) {
       )}
     </div>
   );
+
+  const openDialog = (next: DialogState) => {
+    setDialogStack((prev) => [...prev, next]);
+  };
+
+  const closeDialog = () => setDialogStack([]);
+
+  const goBack = () => {
+    setDialogStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
+  };
+
+  useEffect(() => {
+    if (!dialog) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeDialog();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [dialog]);
 
   const renderDialogContent = () => {
     if (!dialog) return null;
@@ -425,9 +473,9 @@ export function RunVisualization({ runId }: { runId: string }) {
       return (
         <TaskDialog
           runId={payload.runId}
-          onOpenTask={(id) => setDialog({ title: 'Task', kind: 'task', content: { runId: id } })}
+          onOpenTask={(id) => openDialog({ title: 'Task', kind: 'task', content: { runId: id } })}
           onOpenTool={(tool) =>
-            setDialog({
+            openDialog({
               title: `Tool: ${tool.name}`,
               kind: 'tool',
               content: tool,
@@ -449,7 +497,7 @@ export function RunVisualization({ runId }: { runId: string }) {
           variant="ghost"
           size="sm"
           onClick={() => {
-            setDialog({ title: 'Task', kind: 'task', content: { runId } });
+            openDialog({ title: 'Task', kind: 'task', content: { runId } });
           }}
         >
           View task
@@ -464,11 +512,24 @@ export function RunVisualization({ runId }: { runId: string }) {
       </div>
 
       {dialog ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6">
-          <div className="max-h-[85vh] w-full max-w-4xl overflow-y-auto rounded bg-background p-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold">{dialog.title}</h3>
-              <Button variant="ghost" size="sm" onClick={() => setDialog(null)}>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
+          onClick={closeDialog}
+        >
+          <div
+            className="max-h-[85vh] w-full max-w-4xl overflow-y-auto rounded bg-background p-4"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                {dialogStack.length > 1 ? (
+                  <Button variant="ghost" size="sm" onClick={goBack}>
+                    Back
+                  </Button>
+                ) : null}
+                <h3 className="text-sm font-semibold">{dialog.title}</h3>
+              </div>
+              <Button variant="ghost" size="sm" onClick={closeDialog}>
                 Close
               </Button>
             </div>
