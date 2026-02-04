@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 const weatherGetArgs = z.object({
   region: z.string().optional(),
+  location: z.string().optional(),
   start: z.string().optional(),
   end: z.string().optional(),
 });
@@ -108,24 +109,24 @@ export const weatherTool: ToolDef = {
       shortDescription: 'Retrieve weather data',
       longDescription: 'Returns weather for a region and timeframe defined by start and end dates.',
       usageExample:
-        '{"name":"weather.get","args":{"region":"San Francisco, CA","start":"2026-02-03","end":"2026-02-05"}}',
+        '{"name":"weather.get","args":{"location":"San Francisco, CA","start":"2026-02-03","end":"2026-02-05"}}',
       argsSchema: weatherGetArgs,
       classification: 'READ',
       handler: async (ctx, args) => {
-        const { region, start, end } = weatherGetArgs.parse(args);
+        const { region, location, start, end } = weatherGetArgs.parse(args);
         const config = (ctx.toolConfig ?? {}) as { default_region?: string; units?: string };
-        const targetRegion = region ?? config.default_region;
+        const targetRegion = region ?? location ?? config.default_region;
         if (!targetRegion) {
           return { success: false, error: 'Region is required', region: null };
         }
-        const location = await geocode(targetRegion);
-        if (!location) {
+        const geocodedLocation = await geocode(targetRegion);
+        if (!geocodedLocation) {
           return { success: false, error: 'Location not found', region: targetRegion };
         }
-        const data = await fetchWeather(location, start, end);
+        const data = await fetchWeather(geocodedLocation, start, end);
         return {
           success: true,
-          location,
+          location: geocodedLocation,
           units: config.units ?? 'metric',
           data,
         };

@@ -344,6 +344,16 @@ export function RunVisualization({ runId }: { runId: string }) {
     kind?: 'llm_request' | 'llm_response' | 'tool' | 'task' | 'generic';
     content: unknown;
   } | null>(null);
+  const { details, loading } = useRunDetails(runId);
+
+  const latestStep = details?.steps?.[details.steps.length - 1];
+  const latestLabel = latestStep
+    ? latestStep.type === 'tool_call'
+      ? `Tool call: ${latestStep.toolName ?? 'unknown'}`
+      : latestStep.type === 'tool_result'
+        ? `Tool result: ${latestStep.toolName ?? 'unknown'}`
+        : latestStep.type
+    : 'No steps yet';
 
   const renderKeyValue = (label: string, value: unknown) => (
     <div className="flex flex-col gap-1">
@@ -444,6 +454,13 @@ export function RunVisualization({ runId }: { runId: string }) {
         >
           View task
         </Button>
+      </div>
+      <div className="mt-2 text-xs text-muted-foreground">
+        {loading
+          ? 'Loading activity...'
+          : details
+            ? `Status: ${details.run.status} · Steps: ${details.steps.length} · Latest: ${latestLabel}`
+            : 'No activity yet.'}
       </div>
 
       {dialog ? (

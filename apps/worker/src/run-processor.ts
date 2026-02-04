@@ -299,6 +299,50 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
     const memories = await loadCoreMemories(db, run.userId);
     const priorSpawnSignatures = await loadPriorSpawnSignatures(db, runId);
+    const inputText = (run.inputText ?? '').trim();
+    const greetingPattern =
+      /^(hi|hey|hello|yo|sup|hola|hallo|guten tag|good (morning|afternoon|evening))\b/i;
+    const fallbackMessage = greetingPattern.test(inputText)
+      ? 'Hey! How can I help?'
+      : "Sorry, I got stuck while planning. Could you rephrase or be more specific?";
+
+    const forceFinishIfStuck = async (iteration: number, reason: string) => {
+      const hasToolCalls = transcript.some((entry) => entry.type === 'tool_call');
+      const shouldForce =
+        iteration >= Math.min(5, config.runMaxIterations - 1) &&
+        !outputText &&
+        !lastAssistantMessage &&
+        !hasToolCalls;
+      if (!shouldForce) return false;
+
+      await db
+        .update(runs)
+        .set({ outputText: fallbackMessage, status: 'completed', updatedAt: new Date() })
+        .where(eq(runs.id, runId));
+      await appendRunStep(db, {
+        runId,
+        seq: stepSeq++,
+        type: 'finish',
+        resultJson: { output: fallbackMessage, reason },
+      });
+      if (run.kind !== 'subagent') {
+        await sendRunMessage({
+          db,
+          userId: run.userId,
+          channelId: run.channelId,
+          contextId: run.contextId ?? null,
+          content: fallbackMessage,
+          logger,
+          runId,
+          runKind: run.kind ?? 'coordinator',
+        });
+      }
+      logger.info('Run completed after planning stall', { runId, iteration, reason });
+      if (run.parentRunId) {
+        await wakeParentRun(db, run.parentRunId, tenantId, agentId);
+      }
+      return true;
+    };
 
     for (let iteration = 0; iteration < config.runMaxIterations; iteration += 1) {
       const transcriptWindow = trimTranscript(transcript, config.runTranscriptLimit, config.runTranscriptTokenLimit);
@@ -411,6 +455,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             content:
               'Before taking actions, emit note(category="requirements") and note(category="plan") summarizing goals, constraints, and plan.',
           });
+          if (await forceFinishIfStuck(iteration, 'planning_required')) {
+            return;
+          }
           continue;
         }
         const toolCall: ToolCall = {
@@ -631,6 +678,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             content:
               'Before producing output, emit note(category="requirements") and note(category="plan").',
           });
+          if (await forceFinishIfStuck(iteration, 'planning_required')) {
+            return;
+          }
           continue;
         }
         const nextOutput = applyOutputUpdate(outputText, command.output, command.mode);
@@ -668,6 +718,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           resultJson: { content, importance: command.importance ?? 'normal' },
         });
         transcript.push({ type: 'decision', content, importance: command.importance ?? 'normal' });
+        if (await forceFinishIfStuck(iteration, 'decision_loop')) {
+          return;
+        }
         continue;
       }
 
@@ -687,6 +740,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         if (command.category === 'plan') noteCounts.plan += 1;
         if (command.category === 'artifact') noteCounts.artifact += 1;
         if (command.category === 'validation') noteCounts.validation += 1;
+        if (await forceFinishIfStuck(iteration, 'note_loop')) {
+          return;
+        }
         continue;
       }
 
@@ -697,6 +753,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             content:
               'Before finishing, emit note(category="requirements") and note(category="plan").',
           });
+          if (await forceFinishIfStuck(iteration, 'planning_required')) {
+            return;
+          }
           continue;
         }
         if (noteCounts.validation === 0) {
@@ -705,6 +764,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             content:
               'Before finishing, emit note(category="validation") confirming the output meets constraints.',
           });
+          if (await forceFinishIfStuck(iteration, 'validation_required')) {
+            return;
+          }
           continue;
         }
         if (command.output) {
@@ -998,35 +1060,34 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     }
 
     const finalOutput = outputText.trim() || lastAssistantMessage.trim();
-    if (finalOutput) {
-      await db
-        .update(runs)
-        .set({ outputText: finalOutput, status: 'completed', updatedAt: new Date() })
-        .where(eq(runs.id, runId));
-      await appendRunStep(db, {
-        runId,
-        seq: stepSeq++,
-        type: 'finish',
-        resultJson: { output: finalOutput, reason: 'max_iterations' },
-      });
+    const rescueMessage = finalOutput || fallbackMessage;
+    await db
+      .update(runs)
+      .set({ outputText: rescueMessage, status: 'completed', updatedAt: new Date() })
+      .where(eq(runs.id, runId));
+    await appendRunStep(db, {
+      runId,
+      seq: stepSeq++,
+      type: 'finish',
+      resultJson: { output: rescueMessage, reason: 'max_iterations' },
+    });
+    if (run.kind !== 'subagent') {
       await sendRunMessage({
         db,
         userId: run.userId,
         channelId: run.channelId,
         contextId: run.contextId ?? null,
-        content: finalOutput,
+        content: rescueMessage,
         logger,
         runId,
         runKind: run.kind ?? 'coordinator',
       });
-      logger.info('Run completed after max iterations', { runId });
-      if (run.parentRunId) {
-        await wakeParentRun(db, run.parentRunId, tenantId, agentId);
-      }
-      return;
     }
-
-    throw new Error('Run exceeded max iterations without finish');
+    logger.info('Run completed after max iterations', { runId });
+    if (run.parentRunId) {
+      await wakeParentRun(db, run.parentRunId, tenantId, agentId);
+    }
+    return;
   } catch (err) {
     logger.error('Run failed', { runId, err });
     await db.update(runs).set({ status: 'failed', updatedAt: new Date() }).where(eq(runs.id, runId));
