@@ -20,6 +20,7 @@ import { nanoid } from 'nanoid';
 import { config } from './config.js';
 import { decryptSecret } from './crypto.js';
 import { callOpenAIWithFallback, type OpenAIMessage } from './openai-client.js';
+import { ZodError } from 'zod';
 import { enqueueDelivery, enqueueRun } from './queues.js';
 import { randomUUID } from 'crypto';
 
@@ -119,7 +120,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
   let stepSeq = 0;
   let lastToolError: { tool: string; error?: string } | null = null;
-  const repeatedCallCounts = new Map<string, number>();
+    const repeatedCallCounts = new Map<string, number>();
+    const repeatedResultCounts = new Map<string, number>();
   const repeatedSpawnCounts = new Map<string, number>();
   let blockedSpawnCount = 0;
 
@@ -256,9 +258,14 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       'Use finish when the task is complete; the output will be sent to the user. ' +
       'Use decision to record brief coordinator reasoning/justifications; it is shown in the coordinator view but not sent to the user. ' +
       'Use note to record requirements, plan, artifacts, and validation summaries; it is shown in the task view. ' +
-      'If you emit a plan note in a coordinator run, you MUST set_run_limits next. ' +
+      'Requirements note must specify the expected output and decision criteria, not restate the task. ' +
+      'Plan note must be concrete and stepwise (numbered steps), naming the tools you will call and any key parameters (e.g., date ranges). ' +
+      'Artifact note must be exactly one sentence describing the immediate next step you are about to take (not repeating requirements/plan). ' +
+      'Before taking any action (tool_call, send_message, set_output, finish, spawn, sleep), emit note(category="artifact") with exactly one sentence explaining why you are doing the next step and what you are thinking about. After that rationale note, your next response MUST be an action, not another note. ' +
+      'If you emit a plan note in a coordinator run, you MUST set_run_limits next. Choose a maxIterations high enough to complete the plan; use the minimum only for very simple tasks. ' +
       'If required data is missing or a tool returns success:false, you MUST finish with a limitation statement and best-effort output. Do not keep iterating. ' +
       'Never claim a multi-day forecast unless the tool result includes daily[]. ' +
+      'If a tool has a days/limit constraint (e.g., max 14 days), split the request into multiple calls using startDate to cover the full range. ' +
       'When unsure or planning multi-step work, emit a decision before taking actions. ' +
       'agentLevel indicates nesting depth: 0 = coordinator, 1 = subagent, 2 = subsubagent. ' +
       'If agentLevel >= 2, you MUST NOT spawn any subagents. ' +
@@ -280,10 +287,10 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       'Use tools.list to see all tools and short descriptions. ' +
       'Use tools.describe to see full details for a specific tool. ' +
       'Process tasks using this internal loop, emitting structured notes so the task dialog shows your work:\n' +
-      'Step 1: Identify the goal/target/output/role. Emit note(category="requirements").\n' +
-      'Step 2: Hard constraints + success criteria. Emit note(category="requirements").\n' +
+      'Step 1: Output specification (what the user should receive). Emit note(category="requirements").\n' +
+      'Step 2: Decision criteria and constraints. Emit note(category="requirements").\n' +
       'Step 3: Resources (tools/memories/context). Emit note(category="plan") summarizing what you will use.\n' +
-      'Step 4: Micro-plan and delegation decision. Emit note(category="plan").\n' +
+      'Step 4: Concrete numbered steps with tool calls/parameters. Emit note(category="plan").\n' +
       'Step 5: Execute tasks and summarize partial results. Emit note(category="artifact") as you go.\n' +
       'Step 6: Validate outputs. Emit note(category="validation").\n' +
       'Step 7: Assemble final output. Emit note(category="artifact").\n' +
@@ -307,18 +314,129 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       if (systemNoteCache.has(content)) return false;
       systemNoteCache.add(content);
       transcript.push({ type: 'system_note', content });
+      void appendRunStep(db, {
+        runId,
+        seq: stepSeq++,
+        type: 'message',
+        resultJson: { event: 'system_note', content },
+      });
       return true;
     };
+    const normalizeForSimilarity = (text: string) =>
+      text
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((token) => token.length > 2);
+    const jaccardSimilarity = (a: string, b: string) => {
+      const aTokens = new Set(normalizeForSimilarity(a));
+      const bTokens = new Set(normalizeForSimilarity(b));
+      if (aTokens.size === 0 || bTokens.size === 0) return 0;
+      let overlap = 0;
+      for (const token of aTokens) {
+        if (bTokens.has(token)) overlap += 1;
+      }
+      const union = aTokens.size + bTokens.size - overlap;
+      return union === 0 ? 0 : overlap / union;
+    };
+    const isTooSimilar = (a: string, b: string, threshold = 0.7) =>
+      jaccardSimilarity(a, b) >= threshold;
+    const hasNumberedSteps = (text: string) => /(^|\n)\s*\d+\./.test(text);
+    const hasOutputKeyword = (text: string) =>
+      /(output|result|return|provide|deliver|include|list|date|day|criteria|format|best)/i.test(
+        text
+      );
+    const toolNames = toolRegistry.getAllTools().map((tool) => tool.name);
+    const mentionsAnyTool = (text: string) =>
+      toolNames.some((name) => name && text.toLowerCase().includes(name.toLowerCase()));
     const hardCap = Math.max(1, config.runMaxIterationsHardCap);
-    let runIterationLimit = Math.min(Math.max(1, config.runMaxIterations), hardCap);
+    const minIterations = Math.max(1, config.runMinIterations);
+    let runIterationLimit = Math.min(Math.max(minIterations, config.runMaxIterations), hardCap);
     let runLimitsSet = false;
     let limitationRequired = false;
     let limitationReason: string | null = null;
+    let rationaleReady = false;
+    let forceActionNext = false;
+    let actionViolationCount = 0;
+    let budgetExceededStrikes = 0;
+    const runStartMs = Date.now();
+    let progressTick = 0;
+    let lastProgressTick = 0;
+    let actionCount = 0;
+    let lastRequirementsNote = '';
+    let lastPlanNote = '';
+    let requirementsRewriteRequested = false;
+    let planRewriteRequested = false;
+    let artifactRewriteRequested = false;
+    const nudgeCounts = new Map<string, number>();
+    let consecutiveNotes = 0;
     const recentIterations: Array<{
       hadToolCall: boolean;
       outputSnapshot: string;
       commandSignature: string | null;
     }> = [];
+    let validationAttempts = 0;
+    let lastValidatedOutput = '';
+    let lastValidationFeedback = '';
+    let budgetExceededOnce = false;
+    let budgetDecisionLogged = false;
+    let lastBudgetDecision: { action: 'extend' | 'finish'; reason: string } | null = null;
+    let runtimeWarningSent = false;
+    let runLimitsMissingReminders = 0;
+
+    const validateOutput = async (candidate: string, reason: string, payload: unknown) => {
+      if (!candidate.trim()) {
+        return { decision: 'send' as const, feedback: '', retry: false };
+      }
+      if (validationAttempts >= 2) {
+        return { decision: 'send' as const, feedback: '', retry: false };
+      }
+      if (candidate === lastValidatedOutput) {
+        return { decision: 'send' as const, feedback: '', retry: false };
+      }
+      const validationSystemPrompt =
+        'You are an output validator. Return only JSON: ' +
+        '{"decision":"send"|"revise","feedback":"...","retry":true|false}. ' +
+        'Use "revise" if the output is misleading, incomplete, or violates constraints. ' +
+        'Use "retry": true only if another attempt is likely to improve the result. ' +
+        'If the output is a failure/limitation message, decide whether to retry or send as-is.';
+      const validationUserPrompt = JSON.stringify({
+        reason,
+        output: candidate,
+        context: payload,
+      });
+      let responseText = '';
+      try {
+        responseText = await callOpenAIWithFallback(
+          apiKey,
+          model,
+          fallbackModel,
+          [
+            { role: 'system', content: validationSystemPrompt },
+            { role: 'user', content: validationUserPrompt },
+          ],
+          { temperature: 0 }
+        );
+      } catch {
+        return { decision: 'send' as const, feedback: '', retry: false };
+      }
+      try {
+        const parsed = JSON.parse(responseText) as {
+          decision?: 'send' | 'revise';
+          feedback?: string;
+          retry?: boolean;
+        };
+        const decision = parsed.decision === 'revise' ? 'revise' : 'send';
+        const feedback = typeof parsed.feedback === 'string' ? parsed.feedback.trim() : '';
+        const retry = Boolean(parsed.retry);
+        validationAttempts += 1;
+        lastValidatedOutput = candidate;
+        lastValidationFeedback = feedback;
+        return { decision, feedback, retry };
+      } catch {
+        return { decision: 'send' as const, feedback: '', retry: false };
+      }
+    };
     const conversation =
       run.kind === 'coordinator'
         ? await loadConversation(db, run.channelId, run.contextId ?? null, undefined)
@@ -363,6 +481,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     };
 
     const forceFinishIfStuck = async (iteration: number, reason: string) => {
+      if (actionCount === 0) {
+        return false;
+      }
       const hasToolCalls = transcript.some((entry) => entry.type === 'tool_call');
       const shouldForce =
         iteration >= Math.min(5, config.runMaxIterations - 1) &&
@@ -377,6 +498,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     };
 
     const recordIterationAndCheck = async (commandSignature: string | null, hadToolCall: boolean) => {
+      if (actionCount === 0) {
+        return false;
+      }
       const outputSnapshot = (outputText || lastAssistantMessage || '').trim();
       recentIterations.push({ hadToolCall, outputSnapshot, commandSignature });
       if (recentIterations.length > 3) {
@@ -405,11 +529,41 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     };
 
     for (let iteration = 0; iteration < hardCap; iteration += 1) {
-      const budgetExceeded = iteration >= runIterationLimit;
+      if (Date.now() - runStartMs > config.runMaxRuntimeMs) {
+        if (!runtimeWarningSent) {
+          runtimeWarningSent = true;
+          appendSystemNoteOnce(
+            'Runtime limit reached. Finish now with best-effort output and a brief explanation.'
+          );
+        } else {
+          await finishRun(
+            'I reached the maximum allowed runtime while working on this task. Here is the best I can do so far.',
+            'max_runtime'
+          );
+          return;
+        }
+      }
+      if (runtimeWarningSent && Date.now() - runStartMs > config.runMaxRuntimeMs * 1.5) {
+        await finishRun(
+          'I reached the maximum allowed runtime while working on this task. Here is the best I can do so far.',
+          'max_runtime'
+        );
+        return;
+      }
+      const budgetExceeded = actionCount > 0 && iteration >= runIterationLimit;
       if (budgetExceeded) {
+        if (!budgetExceededOnce) {
+          budgetExceededOnce = true;
+          budgetDecisionLogged = false;
+          lastBudgetDecision = null;
+        }
         const notice =
           'Budget reached. Reflect on progress; if stuck, finish with best-effort output and a brief explanation. Otherwise set_run_limits(maxIterations) with a higher limit (<= hard cap) and a brief reason.';
         appendSystemNoteOnce(notice);
+      } else if (budgetExceededOnce) {
+        budgetExceededOnce = false;
+        budgetDecisionLogged = false;
+        lastBudgetDecision = null;
       }
       const transcriptWindow = trimTranscript(transcript, config.runTranscriptLimit, config.runTranscriptTokenLimit);
 
@@ -520,10 +674,36 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         iteration >= 2 &&
         command.type !== 'set_run_limits'
       ) {
-        appendSystemNoteOnce('You must set_run_limits(maxIterations) now or you cannot proceed.');
-        if (await recordIterationAndCheck('blocked:set_run_limits', false)) {
-          return;
+        runLimitsMissingReminders += 1;
+        if (runLimitsMissingReminders <= 2) {
+          appendSystemNoteOnce('You must set_run_limits(maxIterations) now or you cannot proceed.');
+          if (await recordIterationAndCheck('blocked:set_run_limits', false)) {
+            return;
+          }
+          continue;
         }
+        appendSystemNoteOnce(
+          'Proceeding without set_run_limits; using the current run budget.'
+        );
+        runLimitsSet = true;
+      }
+
+      const requiresRationale =
+        command.type === 'tool_call' ||
+        command.type === 'send_message' ||
+        command.type === 'set_output' ||
+        command.type === 'finish' ||
+        command.type === 'spawn_subagent' ||
+        command.type === 'spawn_subagents' ||
+        command.type === 'sleep';
+
+      const allowFinishWithoutRationale =
+        command.type === 'finish' && (budgetExceeded || limitationRequired || runtimeWarningSent);
+
+      if (requiresRationale && !rationaleReady && !allowFinishWithoutRationale) {
+        appendSystemNoteOnce(
+          'Before taking any action, emit note(category="artifact") with exactly one sentence explaining why you are doing the next step and what you are thinking about.'
+        );
         continue;
       }
 
@@ -531,6 +711,22 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         appendSystemNoteOnce(
           'Budget reached. Reflect on progress; if stuck, finish with best-effort output and a brief explanation. Otherwise set_run_limits(maxIterations) with a higher limit (<= hard cap) and a brief reason.'
         );
+        budgetExceededStrikes += 1;
+        if (budgetExceededStrikes >= 2 && budgetExceededStrikes < 4) {
+          appendSystemNoteOnce(
+            'Second reminder: you must either set_run_limits to extend the budget or finish now with a reason.'
+          );
+        }
+        if (budgetExceededStrikes >= 4) {
+          appendSystemNoteOnce(
+            'No budget decision provided after multiple reminders; forcing finish.'
+          );
+          await finishRun(
+            'I hit the run iteration limit before completing the task. Here is the best I can provide right now.',
+            'max_iterations'
+          );
+          return;
+        }
         if (await recordIterationAndCheck('blocked:budget', false)) {
           return;
         }
@@ -548,20 +744,60 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       }
 
       if (command.type === 'set_run_limits') {
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
         const requested = Number(command.maxIterations);
         if (!Number.isFinite(requested) || requested <= 0) {
           appendSystemNoteOnce('set_run_limits requires maxIterations to be a positive number.');
           continue;
         }
-        const clamped = Math.max(1, Math.min(hardCap, Math.floor(requested)));
+        const clamped = Math.max(minIterations, Math.min(hardCap, Math.floor(requested)));
+        if (budgetExceeded && actionCount > 0) {
+          budgetDecisionLogged = true;
+          lastBudgetDecision = {
+            action: 'extend',
+            reason: command.reason ?? '',
+          };
+          const noProgress =
+            progressTick <= lastProgressTick ||
+            (recentIterations.length >= 2 &&
+              recentIterations.every((entry) => !entry.hadToolCall) &&
+              new Set(recentIterations.map((entry) => entry.outputSnapshot)).size <= 1);
+          if (noProgress) {
+            await finishRun(
+              'I am not making progress and extending the run limit would not help. Here is the best I can provide right now.',
+              'budget_stuck'
+            );
+            return;
+          }
+          lastProgressTick = progressTick;
+        }
         runIterationLimit = clamped;
         runLimitsSet = true;
+        budgetExceededStrikes = 0;
         await appendRunStep(db, {
           runId,
           seq: stepSeq++,
           type: 'message',
-          resultJson: { event: 'set_run_limits', maxIterations: clamped, reason: command.reason ?? null },
+          resultJson: {
+            event: 'set_run_limits',
+            maxIterations: clamped,
+            reason: command.reason ?? null,
+          },
         });
+        if (budgetExceeded && actionCount > 0) {
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: {
+              event: 'budget_decision',
+              action: 'extend',
+              reason: command.reason ?? null,
+              maxIterations: clamped,
+            },
+          });
+        }
         appendSystemNoteOnce(`Run limits set to ${clamped} iterations.`);
         if (await recordIterationAndCheck(`set_run_limits:${clamped}`, false)) {
           return;
@@ -570,6 +806,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       }
 
       if (command.type === 'tool_call') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
         if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
           appendSystemNoteOnce(
             'Before taking actions, emit note(category="requirements") and note(category="plan") summarizing goals, constraints, and plan.'
@@ -648,6 +889,21 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             'Run tool result'
           );
         }
+        const toolResultSignature = `tool_result:${toolCall.name}:${stableStringify(
+          toolCall.args
+        )}:${stableStringify(result)}`;
+        const resultCount = (repeatedResultCounts.get(toolResultSignature) ?? 0) + 1;
+        repeatedResultCounts.set(toolResultSignature, resultCount);
+        if (result.success) {
+          progressTick += 1;
+        }
+        if (resultCount >= 2) {
+          limitationRequired = true;
+          limitationReason = 'repeated_tool_result';
+          appendSystemNoteOnce(
+            'The same tool call produced the same result multiple times. Change strategy (e.g., adjust parameters or split the request) or finish with a limitation.'
+          );
+        }
         if (!result.success) {
           const key = toolCall.name;
           const count = (toolFailureCounts.get(key) ?? 0) + 1;
@@ -678,6 +934,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       }
 
       if (command.type === 'send_message') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
         const message = command.message?.trim();
         if (!message) {
           throw new Error('send_message requires a non-empty message');
@@ -709,17 +970,25 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         }
 
         if (message === lastAssistantMessage) {
-          await db
-            .update(runs)
-            .set({ outputText: outputText || message, status: 'completed', updatedAt: new Date() })
-            .where(eq(runs.id, runId));
-          await appendRunStep(db, {
-            runId,
-            seq: stepSeq++,
-            type: 'finish',
-            resultJson: { output: outputText || message },
-          });
-          logger.info('Run completed after duplicate send_message', { runId });
+          const candidate = (outputText || message).trim();
+          const validation = await validateOutput(candidate, 'send_message', userPayload);
+          if (validation.decision === 'revise') {
+            appendSystemNoteOnce(
+              `Validation requested changes: ${validation.feedback || 'Improve clarity and correctness.'}`
+            );
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'message',
+              resultJson: { event: 'validation_feedback', feedback: validation.feedback, retry: validation.retry },
+            });
+            if (validation.retry) {
+              limitationRequired = false;
+              limitationReason = null;
+            }
+            continue;
+          }
+          await finishRun(candidate, 'send_message_duplicate');
           return;
         }
 
@@ -758,17 +1027,24 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           message.trim().endsWith('?') ||
           /bitte|please|could you|can you/i.test(message);
         if ((!hasToolCalls && !hasOutputUpdates && !outputText) || asksUser || toolFailureCounts.size > 0) {
-          await db
-            .update(runs)
-            .set({ outputText: message, status: 'completed', updatedAt: new Date() })
-            .where(eq(runs.id, runId));
-          await appendRunStep(db, {
-            runId,
-            seq: stepSeq++,
-            type: 'finish',
-            resultJson: { output: message },
-          });
-          logger.info('Run completed after direct send_message', { runId });
+          const validation = await validateOutput(message, 'send_message', userPayload);
+          if (validation.decision === 'revise') {
+            appendSystemNoteOnce(
+              `Validation requested changes: ${validation.feedback || 'Improve clarity and correctness.'}`
+            );
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'message',
+              resultJson: { event: 'validation_feedback', feedback: validation.feedback, retry: validation.retry },
+            });
+            if (validation.retry) {
+              limitationRequired = false;
+              limitationReason = null;
+            }
+            continue;
+          }
+          await finishRun(message, 'send_message_direct');
           return;
         }
         if (await recordIterationAndCheck('send_message', false)) {
@@ -778,6 +1054,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       }
 
       if (command.type === 'set_output') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
         if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
           appendSystemNoteOnce(
             'Before producing output, emit note(category="requirements") and note(category="plan").'
@@ -791,7 +1072,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           continue;
         }
         const nextOutput = applyOutputUpdate(outputText, command.output, command.mode);
+        const outputChanged = nextOutput !== outputText;
         outputText = nextOutput;
+        if (outputChanged) {
+          progressTick += 1;
+        }
 
         await db
           .update(runs)
@@ -810,6 +1095,23 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           output: command.output,
           mode: command.mode ?? 'replace',
         });
+        const validation = await validateOutput(outputText, 'set_output', userPayload);
+        if (validation.decision === 'revise') {
+          appendSystemNoteOnce(
+            `Validation requested changes: ${validation.feedback || 'Improve completeness and correctness.'}`
+          );
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'validation_feedback', feedback: validation.feedback, retry: validation.retry },
+          });
+          if (validation.retry) {
+            limitationRequired = false;
+            limitationReason = null;
+          }
+          continue;
+        }
         if (await recordIterationAndCheck('set_output', false)) {
           return;
         }
@@ -828,6 +1130,21 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           resultJson: { content, importance: command.importance ?? 'normal' },
         });
         transcript.push({ type: 'decision', content, importance: command.importance ?? 'normal' });
+        if (budgetExceeded) {
+          budgetDecisionLogged = true;
+          const isExtend = /(extend|increase|more iterations|continue)/i.test(content);
+          lastBudgetDecision = { action: isExtend ? 'extend' : 'finish', reason: content };
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: {
+              event: 'budget_decision',
+              action: lastBudgetDecision.action,
+              reason: content,
+            },
+          });
+        }
         if (await forceFinishIfStuck(iteration, 'decision_loop')) {
           return;
         }
@@ -842,6 +1159,90 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         if (!content) {
           throw new Error('note requires non-empty content');
         }
+        consecutiveNotes += 1;
+        if (forceActionNext) {
+          if (command.category !== 'artifact') {
+            const reason = 'post_rationale_note';
+            if (consecutiveNotes >= 3) {
+              const nextCount = (nudgeCounts.get(reason) ?? 0) + 1;
+              if (nextCount <= 2) {
+                nudgeCounts.set(reason, nextCount);
+                const nudge =
+                  nextCount === 1
+                    ? 'You already provided the rationale. Your next response must be an action (tool_call, set_output, send_message, finish, spawn, sleep).'
+                    : 'Second reminder: stop emitting notes and take the next action now (tool_call, set_output, send_message, finish, spawn, sleep).';
+                appendSystemNoteOnce(nudge);
+              }
+            }
+            continue;
+          }
+          actionViolationCount += 1;
+          const reason = 'post_rationale_artifact';
+          if (consecutiveNotes >= 3) {
+            const nextCount = (nudgeCounts.get(reason) ?? 0) + 1;
+            if (nextCount <= 2) {
+              nudgeCounts.set(reason, nextCount);
+              const nudge =
+                nextCount === 1
+                  ? 'You already provided the rationale. Your next response must be an action (tool_call, set_output, send_message, finish, spawn, sleep).'
+                  : 'Second reminder: stop emitting notes and take the next action now (tool_call, set_output, send_message, finish, spawn, sleep).';
+              appendSystemNoteOnce(nudge);
+            }
+          }
+          continue;
+        }
+        if (command.category === 'artifact' && rationaleReady) {
+          appendSystemNoteOnce(
+            'You already provided the rationale. Take the next action now (tool_call, set_output, finish, spawn, sleep).'
+          );
+          continue;
+        }
+        if (command.category === 'requirements' && !requirementsRewriteRequested) {
+          const tooSimilarToTask = run.inputText
+            ? isTooSimilar(content, run.inputText)
+            : false;
+          const tooSimilarToPlan =
+            lastPlanNote && isTooSimilar(content, lastPlanNote);
+          if (tooSimilarToTask || tooSimilarToPlan || !hasOutputKeyword(content)) {
+            appendSystemNoteOnce(
+              'Rewrite requirements as an output specification and decision criteria (what the user will receive), not a restatement of the task.'
+            );
+            requirementsRewriteRequested = true;
+            continue;
+          }
+        }
+        if (command.category === 'plan' && !planRewriteRequested) {
+          const tooSimilarToTask = run.inputText
+            ? isTooSimilar(content, run.inputText)
+            : false;
+          const tooSimilarToRequirements =
+            lastRequirementsNote && isTooSimilar(content, lastRequirementsNote);
+          const taskHintsTools = run.inputText
+            ? /(weather|forecast|wetter|temperature|rain|snow)/i.test(run.inputText)
+            : false;
+          const missingTools =
+            toolNames.length > 0 && taskHintsTools && !mentionsAnyTool(content);
+          if (tooSimilarToTask || tooSimilarToRequirements || !hasNumberedSteps(content) || missingTools) {
+            appendSystemNoteOnce(
+              'Rewrite plan as concrete numbered steps. Name the tools you will call and key parameters (e.g., date ranges).'
+            );
+            planRewriteRequested = true;
+            continue;
+          }
+        }
+        if (command.category === 'artifact' && !artifactRewriteRequested) {
+          const tooSimilarToRequirements =
+            lastRequirementsNote && isTooSimilar(content, lastRequirementsNote, 0.6);
+          const tooSimilarToPlan =
+            lastPlanNote && isTooSimilar(content, lastPlanNote, 0.6);
+          if (tooSimilarToRequirements || tooSimilarToPlan) {
+            appendSystemNoteOnce(
+              'Rewrite the artifact as a single sentence about the immediate next step you are about to take (do not repeat requirements or plan).'
+            );
+            artifactRewriteRequested = true;
+            continue;
+          }
+        }
         await appendRunStep(db, {
           runId,
           seq: stepSeq++,
@@ -853,16 +1254,38 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         if (command.category === 'plan') noteCounts.plan += 1;
         if (command.category === 'artifact') noteCounts.artifact += 1;
         if (command.category === 'validation') noteCounts.validation += 1;
+        if (command.category === 'requirements') lastRequirementsNote = content;
+        if (command.category === 'plan') lastPlanNote = content;
+        if (command.category === 'artifact') {
+          rationaleReady = true;
+          forceActionNext = true;
+        }
         if (await forceFinishIfStuck(iteration, 'note_loop')) {
           return;
         }
-        if (await recordIterationAndCheck(`note:${command.category}`, false)) {
-          return;
+        if (command.category !== 'artifact') {
+          if (await recordIterationAndCheck(`note:${command.category}`, false)) {
+            return;
+          }
         }
         continue;
       }
 
       if (command.type === 'finish') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
+        if (budgetExceeded && actionCount > 0 && !budgetDecisionLogged && !runtimeWarningSent) {
+          appendSystemNoteOnce(
+            'Budget reached. Before finishing, emit a decision explaining why stopping now is the right choice.'
+          );
+          if (await recordIterationAndCheck('blocked:budget_decision', false)) {
+            return;
+          }
+          continue;
+        }
         if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
           appendSystemNoteOnce(
             'Before finishing, emit note(category="requirements") and note(category="plan").'
@@ -885,44 +1308,39 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           outputText = applyOutputUpdate(outputText, command.output, command.mode);
         }
 
-        await db
-          .update(runs)
-          .set({ outputText, status: 'completed', updatedAt: new Date() })
-          .where(eq(runs.id, runId));
-
-        await appendRunStep(db, {
-          runId,
-          seq: stepSeq++,
-          type: 'finish',
-          resultJson: { output: outputText },
-        });
-
         const finalOutput = outputText.trim() || lastAssistantMessage.trim();
         if (!finalOutput) {
           throw new Error('Finish called without output or prior message');
         }
 
-        if (run.kind !== 'subagent' && finalOutput !== lastAssistantMessage.trim()) {
-          await sendRunMessage({
-            db,
-            userId: run.userId,
-            channelId: run.channelId,
-            contextId: run.contextId ?? null,
-            content: finalOutput,
-            logger,
+        const validation = await validateOutput(finalOutput, 'finish', userPayload);
+        if (validation.decision === 'revise') {
+          appendSystemNoteOnce(
+            `Validation requested changes: ${validation.feedback || 'Improve clarity and correctness.'}`
+          );
+          await appendRunStep(db, {
             runId,
-            runKind: run.kind ?? 'coordinator',
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'validation_feedback', feedback: validation.feedback, retry: validation.retry },
           });
+          if (validation.retry) {
+            limitationRequired = false;
+            limitationReason = null;
+          }
+          continue;
         }
 
-        logger.info('Run completed', { runId });
-        if (run.parentRunId) {
-          await wakeParentRun(db, run.parentRunId, tenantId, agentId);
-        }
+        await finishRun(finalOutput, 'finish');
         return;
       }
 
       if (command.type === 'sleep') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
         const wakeAtDate = computeWakeAt(command.wakeAt, command.delaySeconds);
         await appendRunStep(db, {
           runId,
@@ -973,6 +1391,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       }
 
       if (command.type === 'spawn_subagent' || command.type === 'spawn_subagents') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
         const agentLevel =
           run.kind === 'subagent' ? ((run.inputJson as any)?.agentLevel ?? 1) : 0;
         if (agentLevel >= 2) {
@@ -1428,10 +1851,22 @@ async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promis
     return result;
   } catch (err) {
     logger.error('Tool execution failed', { toolName: toolCall.name, err });
+    const isZod = err instanceof ZodError;
     const result: ToolResult = {
       id: toolCall.id,
       success: false,
-      error: String(err),
+      error: isZod ? 'invalid_args' : String(err),
+      result: isZod
+        ? {
+            error_code: 'invalid_args',
+            error_message: 'Tool arguments failed validation.',
+            details: err.issues.map((issue) => ({
+              path: issue.path.join('.'),
+              message: issue.message,
+              code: issue.code,
+            })),
+          }
+        : undefined,
     };
     await db.insert(runSteps).values({
       runId,

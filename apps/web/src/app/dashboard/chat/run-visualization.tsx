@@ -37,6 +37,17 @@ type RunDetails = {
 type TaskDialogEntry =
   | { id: string; seq: number; kind: 'decision'; content: string; importance: string }
   | { id: string; seq: number; kind: 'note'; category: 'requirements' | 'plan' | 'artifact' | 'validation'; content: string }
+  | { id: string; seq: number; kind: 'system_note'; content: string }
+  | { id: string; seq: number; kind: 'budget_decision'; action: string; reason?: string | null; maxIterations?: number | null }
+  | {
+      id: string;
+      seq: number;
+      kind: 'event';
+      label: string;
+      details: Array<{ key: string; value: string }>;
+      raw?: unknown;
+    }
+  | { id: string; seq: number; kind: 'tool_result'; label: string; toolName: string; result?: unknown }
   | {
       id: string;
       seq: number;
@@ -55,7 +66,7 @@ type TaskDialogEntry =
     }
   | { id: string; seq: number; kind: 'message'; label: string; detail: string }
   | { id: string; seq: number; kind: 'sleep'; label: string; detail: string }
-  | { id: string; seq: number; kind: 'finish'; label: string };
+  | { id: string; seq: number; kind: 'finish'; label: string; reason?: string | null };
 
 function TaskDialog({
   runId,
@@ -68,6 +79,8 @@ function TaskDialog({
 }) {
   const { details, children, loading, reload } = useRunDetails(runId);
   const [showFullOutput, setShowFullOutput] = useState(false);
+  const [showEvents, setShowEvents] = useState(true);
+  const [expandedEvents, setExpandedEvents] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -80,6 +93,28 @@ function TaskDialog({
     if (!details) return [];
     const items: TaskDialogEntry[] = [];
     const stepMap = details.steps;
+    const formatEventDetails = (payload: Record<string, unknown> | null | undefined) => {
+      if (!payload) return [];
+      const entriesList: Array<{ key: string; value: string }> = [];
+      Object.entries(payload).forEach(([key, value]) => {
+        if (value === undefined) return;
+        if (value === null) {
+          entriesList.push({ key, value: 'null' });
+          return;
+        }
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          const text = String(value);
+          entriesList.push({ key, value: text.length > 280 ? `${text.slice(0, 280)}…` : text });
+          return;
+        }
+        if (Array.isArray(value)) {
+          entriesList.push({ key, value: `list(${value.length})` });
+          return;
+        }
+        entriesList.push({ key, value: 'object' });
+      });
+      return entriesList;
+    };
 
     stepMap.forEach((step) => {
       if (step.type === 'note') {
@@ -126,8 +161,27 @@ function TaskDialog({
         });
       }
 
+      if (step.type === 'tool_result') {
+        items.push({
+          id: step.id,
+          seq: step.seq,
+          kind: 'tool_result',
+          label: `${step.toolName ?? 'tool'} result`,
+          toolName: step.toolName ?? 'tool',
+          result: step.resultJson,
+        });
+      }
+
       if (step.type === 'message') {
-        const payload = step.resultJson as { event?: string; subagents?: any; reason?: string } | null;
+        const payload = step.resultJson as {
+          event?: string;
+          subagents?: any;
+          reason?: string;
+          content?: string;
+          action?: string;
+          maxIterations?: number;
+          feedback?: string;
+        } | null;
         if (payload?.event === 'spawn_subagents') {
           const subagents = Array.isArray(payload.subagents) ? payload.subagents : [];
           const statusById = new Map(children.map((child) => [child.id, child.status]));
@@ -144,15 +198,52 @@ function TaskDialog({
             })),
           });
         }
-        if (payload?.event === 'sleep') {
+        if (payload?.event === 'budget_decision') {
           items.push({
             id: step.id,
             seq: step.seq,
-            kind: 'sleep',
-            label: 'Sleep',
-            detail: payload?.reason ?? 'Waiting for wake trigger',
+            kind: 'budget_decision',
+            action: payload.action ?? 'unknown',
+            reason: payload.reason ?? null,
+            maxIterations: payload.maxIterations ?? null,
           });
         }
+        if (payload?.event === 'system_note' && payload.content) {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'system_note',
+            content: payload.content,
+          });
+        }
+        if (payload?.event === 'validation_feedback') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Validation feedback',
+            detail: payload.feedback ?? 'Validation requested changes.',
+          });
+        }
+          if (payload?.event === 'sleep') {
+            items.push({
+              id: step.id,
+              seq: step.seq,
+              kind: 'sleep',
+              label: 'Sleep',
+              detail: payload?.reason ?? 'Waiting for wake trigger',
+            });
+          }
+      if (payload?.event && !['spawn_subagents', 'sleep', 'budget_decision', 'system_note', 'validation_feedback'].includes(payload.event)) {
+        items.push({
+          id: step.id,
+          seq: step.seq,
+          kind: 'event',
+          label: `Event · ${payload.event}`,
+          details: formatEventDetails(payload),
+          raw: payload,
+        });
+      }
       }
 
       if (step.type === 'assistant_message') {
@@ -169,11 +260,13 @@ function TaskDialog({
       }
 
       if (step.type === 'finish') {
+        const payload = step.resultJson as { reason?: string } | null;
         items.push({
           id: step.id,
           seq: step.seq,
           kind: 'finish',
           label: 'Finished',
+          reason: payload?.reason ?? null,
         });
       }
     });
@@ -181,12 +274,145 @@ function TaskDialog({
     return items.sort((a, b) => a.seq - b.seq);
   }, [details, children]);
 
+  const runBudget = useMemo(() => {
+    if (!details) return null;
+    const reversed = [...details.steps].reverse();
+    const budgetStep = reversed.find((step) => {
+      if (step.type !== 'message') return false;
+      const payload = step.resultJson as { event?: string; maxIterations?: number } | null;
+      return payload?.event === 'set_run_limits' && typeof payload.maxIterations === 'number';
+    });
+    if (!budgetStep) return null;
+    const payload = budgetStep.resultJson as { maxIterations?: number; reason?: string } | null;
+    return {
+      maxIterations: payload?.maxIterations ?? null,
+      reason: payload?.reason ?? null,
+    };
+  }, [details]);
+
+  const finishReason = useMemo(() => {
+    if (!details) return null;
+    const finishStep = [...details.steps].reverse().find((step) => step.type === 'finish');
+    const payload = (finishStep?.resultJson ?? null) as { reason?: string } | null;
+    return payload?.reason ?? null;
+  }, [details]);
+
   if (loading || !details) {
     return <div className="text-xs text-muted-foreground">Loading task…</div>;
   }
 
+  const toggleEventExpanded = (id: string) => {
+    setExpandedEvents((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const buildTaskText = () => {
+    const lines: string[] = [];
+    lines.push('Task');
+    lines.push('Close');
+    lines.push(`Status: ${details.run.status}`);
+    lines.push(`Profile: ${details.run.profile ?? details.run.kind ?? 'coordinator'}`);
+    lines.push('Run Metadata');
+    lines.push(`Run ID: ${details.run.id}`);
+    lines.push(`Agent ID: ${details.run.agentId}`);
+    lines.push(`Kind: ${details.run.kind ?? 'coordinator'}`);
+    lines.push(`Context ID: ${details.run.contextId ?? 'none'}`);
+    lines.push(`Updated: ${details.run.updatedAt ?? 'unknown'}`);
+    lines.push(`Wake Reason: ${details.run.wakeReason ?? 'none'}`);
+    lines.push(`Wake At: ${details.run.wakeAt ?? 'none'}`);
+    lines.push(
+      `Tools Allowed: ${Array.isArray(details.run.allowedTools) ? details.run.allowedTools.length : 'all'}`
+    );
+    lines.push(`Run Budget: ${runBudget?.maxIterations ?? 'not set'}`);
+    lines.push(`Budget Reason: ${runBudget?.reason ?? 'n/a'}`);
+    lines.push(`Finish Reason: ${finishReason ?? 'n/a'}`);
+    lines.push('Task');
+    lines.push(details.run.inputText);
+
+    const visibleEntries = entries.filter((entry) => showEvents || entry.kind !== 'event');
+    visibleEntries.forEach((entry) => {
+      if (entry.kind === 'note') {
+        lines.push(entry.category);
+        lines.push(entry.content);
+      } else if (entry.kind === 'decision') {
+        lines.push(`decision (${entry.importance})`);
+        lines.push(entry.content);
+      } else if (entry.kind === 'system_note') {
+        lines.push('system_note');
+        lines.push(entry.content);
+      } else if (entry.kind === 'budget_decision') {
+        lines.push(`budget_decision (${entry.action})`);
+        if (entry.reason) lines.push(entry.reason);
+        if (typeof entry.maxIterations === 'number') {
+          lines.push(`maxIterations: ${entry.maxIterations}`);
+        }
+      } else if (entry.kind === 'tool') {
+        lines.push(entry.label);
+      } else if (entry.kind === 'tool_result') {
+        lines.push(entry.label);
+      } else if (entry.kind === 'spawn') {
+        lines.push(entry.label);
+        entry.subagents.forEach((sub) => {
+          lines.push(`${sub.profile ?? 'subagent'} · ${sub.task} · ${sub.status ?? 'unknown'}`);
+        });
+      } else if (entry.kind === 'message') {
+        lines.push(entry.label);
+        lines.push(entry.detail);
+      } else if (entry.kind === 'sleep') {
+        lines.push(entry.label);
+        lines.push(entry.detail);
+      } else if (entry.kind === 'event') {
+        lines.push(entry.label);
+        entry.details.forEach((detail) => {
+          lines.push(`${detail.key}: ${detail.value}`);
+        });
+        if (expandedEvents.has(entry.id)) {
+          lines.push('json:');
+          lines.push(JSON.stringify(entry.raw ?? {}, null, 2));
+        }
+      } else if (entry.kind === 'finish') {
+        lines.push(entry.label);
+        if (entry.reason) lines.push(`Reason: ${entry.reason}`);
+      }
+    });
+
+    if (details.run.outputText) {
+      lines.push('Output');
+      lines.push(details.run.outputText);
+    }
+
+    return lines.join('\n');
+  };
+
+  const copyTaskText = async () => {
+    const text = buildTaskText();
+    await navigator.clipboard.writeText(text);
+  };
+
   return (
     <div className="space-y-4 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={showEvents}
+              onChange={(event) => setShowEvents(event.target.checked)}
+            />
+            Show events
+          </label>
+        </div>
+        <Button variant="outline" size="sm" onClick={copyTaskText}>
+          Copy task history
+        </Button>
+      </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         <div>Status: {details.run.status}</div>
         <div>Profile: {details.run.profile ?? details.run.kind ?? 'coordinator'}</div>
@@ -202,6 +428,9 @@ function TaskDialog({
           <div>Wake Reason: {details.run.wakeReason ?? 'none'}</div>
           <div>Wake At: {details.run.wakeAt ?? 'none'}</div>
           <div>Tools Allowed: {Array.isArray(details.run.allowedTools) ? details.run.allowedTools.length : 'all'}</div>
+          <div>Run Budget: {runBudget?.maxIterations ?? 'not set'}</div>
+          <div>Budget Reason: {runBudget?.reason ?? 'n/a'}</div>
+          <div>Finish Reason: {finishReason ?? 'n/a'}</div>
         </div>
       </div>
       <div className="rounded border border-border p-3">
@@ -212,7 +441,9 @@ function TaskDialog({
         {entries.length === 0 ? (
           <div className="text-xs text-muted-foreground">No actions recorded yet.</div>
         ) : (
-          entries.map((entry, index) => {
+          entries
+            .filter((entry) => showEvents || entry.kind !== 'event')
+            .map((entry, index) => {
             if (entry.kind === 'finish' && details.run.outputText) {
               const output = details.run.outputText;
               const preview = output.length > 240 ? `${output.slice(0, 240)}…` : output;
@@ -252,6 +483,31 @@ function TaskDialog({
                 </div>
               );
             }
+            if (entry.kind === 'system_note') {
+              return (
+                <div key={entry.id} className="rounded border border-border bg-amber-50/60 p-3 text-amber-900">
+                  <div className="text-[11px] uppercase tracking-wide text-amber-700">System note</div>
+                  <div className="mt-1 whitespace-pre-wrap">{entry.content}</div>
+                </div>
+              );
+            }
+            if (entry.kind === 'budget_decision') {
+              return (
+                <div key={entry.id} className="rounded border border-border bg-accent/20 p-3">
+                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                    Budget decision · {entry.action}
+                  </div>
+                  <div className="mt-1 whitespace-pre-wrap">
+                    {entry.reason || 'No reason provided.'}
+                  </div>
+                  {typeof entry.maxIterations === 'number' ? (
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      New max iterations: {entry.maxIterations}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            }
             if (entry.kind === 'tool') {
               return (
                 <div key={entry.id} className="rounded border border-border p-3">
@@ -264,6 +520,27 @@ function TaskDialog({
                         onOpenTool({
                           name: entry.toolName,
                           args: entry.args,
+                          result: entry.result,
+                        })
+                      }
+                    >
+                      View
+                    </Button>
+                  </div>
+                </div>
+              );
+            }
+            if (entry.kind === 'tool_result') {
+              return (
+                <div key={entry.id} className="rounded border border-border p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="font-medium">{entry.label}</div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        onOpenTool({
+                          name: entry.toolName,
                           result: entry.result,
                         })
                       }
@@ -310,6 +587,35 @@ function TaskDialog({
                 </div>
               );
             }
+            if (entry.kind === 'event') {
+              const isExpanded = expandedEvents.has(entry.id);
+              return (
+                <div key={entry.id} className="rounded border border-border bg-muted/20 p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="font-medium">{entry.label}</div>
+                    <Button variant="ghost" size="sm" onClick={() => toggleEventExpanded(entry.id)}>
+                      {isExpanded ? 'Hide JSON' : 'Show JSON'}
+                    </Button>
+                  </div>
+                  <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                    {entry.details.length === 0 ? (
+                      <div>No details.</div>
+                    ) : (
+                      entry.details.map((detail) => (
+                        <div key={`${entry.id}-${detail.key}`}>
+                          {detail.key}: {detail.value}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  {isExpanded ? (
+                    <pre className="mt-2 whitespace-pre-wrap rounded border border-border bg-background p-2 text-[11px] text-muted-foreground">
+                      {JSON.stringify(entry.raw ?? {}, null, 2)}
+                    </pre>
+                  ) : null}
+                </div>
+              );
+            }
             if (entry.kind === 'sleep') {
               return (
                 <div key={entry.id} className="rounded border border-border p-3">
@@ -322,6 +628,11 @@ function TaskDialog({
               return (
                 <div key={entry.id} className="rounded border border-border p-3">
                   <div className="font-medium">{entry.label}</div>
+                  {entry.reason ? (
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      Reason: {entry.reason}
+                    </div>
+                  ) : null}
                 </div>
               );
             }

@@ -261,6 +261,9 @@ export const weatherTool: ToolDef = {
               }))
             : undefined;
 
+        const returnedStart = daily[0]?.date ?? startDate;
+        const returnedEnd = daily[daily.length - 1]?.date ?? endDate;
+        const isPartial = returnedStart !== startDate || returnedEnd !== endDate || daily.length < days;
         return {
           location: {
             name: geocodedLocation.name,
@@ -268,6 +271,10 @@ export const weatherTool: ToolDef = {
             lon: geocodedLocation.longitude,
             timezone,
           },
+          requested_range: { start: startDate, end: endDate, days },
+          returned_range: { start: returnedStart, end: returnedEnd, days: daily.length },
+          is_partial: isPartial,
+          reason: isPartial ? 'forecast_limit' : 'full_range',
           current,
           daily,
           ...(hourly ? { hourly } : {}),
