@@ -13,8 +13,8 @@ import {
   userToolSettings,
   triggers,
 } from '@clifford/db';
-import { eq, and, desc } from 'drizzle-orm';
-import { PolicyEngine } from '@clifford/policy';
+import { eq, and, desc, inArray } from 'drizzle-orm';
+import { PolicyEngine, createBudgetState, type BudgetState } from '@clifford/policy';
 import { ToolRegistry } from './tool-registry.js';
 import { nanoid } from 'nanoid';
 import { config } from './config.js';
@@ -58,6 +58,12 @@ type RunCommand =
       type: 'set_run_limits';
       maxIterations: number;
       reason?: string;
+    }
+  | {
+      type: 'recover';
+      reason: string;
+      action?: 'retry' | 'finish' | 'ask_user';
+      message?: string;
     };
 type SubagentSpec = {
   id?: string;
@@ -92,6 +98,7 @@ type TranscriptEntry =
   | { type: 'decision'; content: string; importance?: 'low' | 'normal' | 'high' }
   | { type: 'note'; category: 'requirements' | 'plan' | 'artifact' | 'validation'; content: string }
   | { type: 'system_note'; content: string }
+  | { type: 'recovery'; reason: string; action?: string }
   | { type: 'validation_missing'; detail: string };
 
 export async function processRun(job: Job<RunJob>, logger: Logger) {
@@ -229,76 +236,35 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
     const toolDescriptions = buildToolPrompt(toolRegistry.getAllTools(), run.kind ?? 'coordinator');
 
-    const systemPrompt =
-      'You are a task agent. You MUST respond with a single JSON object only. ' +
-      'No prose, no markdown. The JSON must match one of these shapes:\n' +
-      '1) {"type":"tool_call","name":"tool.command","args":{...}}\n' +
-      '2) {"type":"send_message","message":"..."}\n' +
-      '3) {"type":"set_output","output":"...","mode":"replace"|"append"}\n' +
-      '4) {"type":"finish","output":"...","mode":"replace"|"append"}\n' +
-      '5) {"type":"decision","content":"...","importance":"low"|"normal"|"high"}\n' +
-      '6) {"type":"note","category":"requirements"|"plan"|"artifact"|"validation","content":"..."}\n' +
-      '7) {"type":"set_run_limits","maxIterations":12,"reason":"..."}\n' +
-      '8) {"type":"spawn_subagent","subagent":{"profile":"...","task":"...","tools":["..."],"context":[...]}}\n' +
-      '9) {"type":"spawn_subagents","subagents":[{"profile":"...","task":"...","tools":["..."],"context":[...]}]}\n' +
-      '10) {"type":"sleep","reason":"...","wakeAt":"ISO-8601","delaySeconds":123,"cron":"*/5 * * * *"}\n' +
-      'DEFAULT: answer directly and finish in a single step when possible. ' +
-      'Only use tool_call if it is necessary to answer correctly. ' +
-      'Avoid multi-step iteration for simple questions. ' +
-      'Preserve line breaks in message/output using \\n. ' +
-      'If you are unsure how to answer or need capabilities, first call tools.list. ' +
-      'If tools.list suggests a relevant tool, call tools.describe for that tool before replying. ' +
-      'Do NOT respond with "I cannot" or "I do not have access" without checking tools first. ' +
-      'Tool calls must use the full command name (tool.command), not just the tool name. ' +
-      'Use send_message only to provide progress updates for long tasks. ' +
-      'Use set_output when assembling a longer response over multiple steps. ' +
-      'Use finish when the task is complete; the output will be sent to the user. ' +
-      'Use decision to record brief coordinator reasoning/justifications; it is shown in the coordinator view but not sent to the user. ' +
-      'Use note to record requirements, plan, artifacts, and validation summaries; it is shown in the task view. ' +
-      'Requirements note must specify the expected output and decision criteria, not restate the task. ' +
-      'Plan note must be concrete and stepwise (numbered steps), naming the tools you will call and any key parameters (e.g., date ranges). ' +
-      'Artifact note must be exactly one sentence describing the immediate next step you are about to take (not repeating requirements/plan). ' +
-      'Before taking any action (tool_call, send_message, set_output, finish, spawn, sleep), emit note(category="artifact") with exactly one sentence explaining why you are doing the next step and what you are thinking about. After that rationale note, your next response MUST be an action, not another note. ' +
-      'If you emit a plan note in a coordinator run, you MUST set_run_limits next. Choose a maxIterations high enough to complete the plan; use the minimum only for very simple tasks. ' +
-      'If required data is missing or a tool returns success:false, you MUST finish with a limitation statement and best-effort output. Do not keep iterating. ' +
-      'Never claim a multi-day forecast unless the tool result includes daily[]. ' +
-      'If a tool has a days/limit constraint (e.g., max 14 days), split the request into multiple calls using startDate to cover the full range. ' +
-      'When unsure or planning multi-step work, emit a decision before taking actions. ' +
-      'agentLevel indicates nesting depth: 0 = coordinator, 1 = subagent, 2 = subsubagent. ' +
-      'If agentLevel >= 2, you MUST NOT spawn any subagents. ' +
-      'Only spawn a subagent when it clearly reduces work or parallelizes distinct tasks; otherwise act directly. ' +
-      'Avoid useless delegation; do not spawn a subagent just to ask the user a simple question. ' +
-      'Subagents must NEVER message the user directly; they should finish with output for the coordinator. ' +
-      'If a subagent fails, you must decide whether to retry or stop and explain that decision. ' +
-      'Do not repeat the same tool call or spawn the same subagent spec more than once. ' +
-      'Coordinator runs may spawn subagents and sleep while they work. ' +
-      'Coordinator MUST ensure subagents get all required context (but only the relevant facts). Before spawning, check conversation, transcript, input, and memory. ' +
-      'If information is missing, first try to retrieve it via memory.search or memory.sessions and then include it in subagent.context. ' +
-      'When retrying after a subagent fails due to missing data, enrich context and try again; ask the user only if retrieval fails. ' +
-      'Use sleep with either wakeAt or delaySeconds to resume later (prefer delaySeconds for short waits). ' +
-      'Use the conversation and memories fields for user context. ' +
-      'If the user asks what tools you have or what you can do, call tools.list. ' +
-      'If the user asks for current weather, call tools.list and then the weather tool if available. ' +
-      'If a tool returns a missing-parameter error (e.g., region/location required), check memory/search for the value and retry before asking the user. ' +
-      'If you need tools, use tool_call and wait for tool_result in the transcript. ' +
-      'Use tools.list to see all tools and short descriptions. ' +
-      'Use tools.describe to see full details for a specific tool. ' +
-      'Process tasks using this internal loop, emitting structured notes so the task dialog shows your work:\n' +
-      'Step 1: Output specification (what the user should receive). Emit note(category="requirements").\n' +
-      'Step 2: Decision criteria and constraints. Emit note(category="requirements").\n' +
-      'Step 3: Resources (tools/memories/context). Emit note(category="plan") summarizing what you will use.\n' +
-      'Step 4: Concrete numbered steps with tool calls/parameters. Emit note(category="plan").\n' +
-      'Step 5: Execute tasks and summarize partial results. Emit note(category="artifact") as you go.\n' +
-      'Step 6: Validate outputs. Emit note(category="validation").\n' +
-      'Step 7: Assemble final output. Emit note(category="artifact").\n' +
-      'Step 8: Validate final output. Emit note(category="validation").\n' +
-      'Step 9: Deliver to user or parent agent.\n' +
-      'Error handling: if a task fails, check retry count; retry only when likely to succeed. If not, explain what failed and why, and provide the best alternative.\n\n' +
-      toolDescriptions;
+    const systemPrompt = [
+      'You are a task agent. Reply with a single JSON object only (no prose, no markdown).',
+      'Valid commands:',
+      '1) {"type":"tool_call","name":"tool.command","args":{...}}',
+      '2) {"type":"send_message","message":"..."}',
+      '3) {"type":"set_output","output":"...","mode":"replace"|"append"}',
+      '4) {"type":"finish","output":"...","mode":"replace"|"append"}',
+      '5) {"type":"decision","content":"...","importance":"low"|"normal"|"high"}',
+      '6) {"type":"note","category":"requirements"|"plan"|"artifact"|"validation","content":"..."}',
+      '7) {"type":"set_run_limits","maxIterations":12,"reason":"..."}',
+      '8) {"type":"spawn_subagent","subagent":{"profile":"...","task":"...","tools":["..."],"context":[...]}}',
+      '9) {"type":"spawn_subagents","subagents":[{"profile":"...","task":"...","tools":["..."],"context":[...]}]}',
+      '10) {"type":"sleep","reason":"...","wakeAt":"ISO-8601","delaySeconds":123,"cron":"*/5 * * * *"}',
+      '11) {"type":"recover","reason":"...","action":"retry"|"finish"|"ask_user","message":"..."}',
+      'Rules:',
+      '- Use only the tools and commands listed below.',
+      '- Before any action, emit note(category="requirements") once, then note(category="plan") once.',
+      '- Before each action, emit note(category="artifact") with exactly one sentence rationale.',
+      '- If a tool needs parameters, check memory.search/memory.sessions first when available.',
+      '- For factual or up-to-date claims, use retrieval/search tools if available; otherwise state limitations.',
+      '- If you break format or get stuck, use recover.',
+      '',
+      toolDescriptions,
+    ].join('\n');
 
     const transcript: TranscriptEntry[] = [];
     let outputText = run.outputText ?? '';
     let lastAssistantMessage = '';
+    let lastAssistantMessageSent = false;
     const toolFailureCounts = new Map<string, number>();
     const noteCounts = {
       requirements: 0,
@@ -380,6 +346,10 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     let lastBudgetDecision: { action: 'extend' | 'finish'; reason: string } | null = null;
     let runtimeWarningSent = false;
     let runLimitsMissingReminders = 0;
+    const budgetState = createBudgetState({
+      tokensLimit: config.runMaxTokens,
+      timeLimitMs: config.runBudgetTimeLimitMs,
+    });
 
     const validateOutput = async (candidate: string, reason: string, payload: unknown) => {
       if (!candidate.trim()) {
@@ -404,16 +374,20 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       });
       let responseText = '';
       try {
+        const validationMessages: OpenAIMessage[] = [
+          { role: 'system', content: validationSystemPrompt },
+          { role: 'user', content: validationUserPrompt },
+        ];
+        budgetState.tokensUsed += estimateMessagesTokens(validationMessages);
+        budgetState.timeUsedMs = Date.now() - runStartMs;
         responseText = await callOpenAIWithFallback(
           apiKey,
           model,
           fallbackModel,
-          [
-            { role: 'system', content: validationSystemPrompt },
-            { role: 'user', content: validationUserPrompt },
-          ],
+          validationMessages,
           { temperature: 0 }
         );
+        budgetState.tokensUsed += Math.max(1, Math.ceil(responseText.length / 4));
       } catch {
         return { decision: 'send' as const, feedback: '', retry: false };
       }
@@ -441,6 +415,68 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
     const memories = await loadCoreMemories(db, run.userId);
     const priorSpawnSignatures = await loadPriorSpawnSignatures(db, runId);
+
+    if (run.wakeReason === 'tool_confirm') {
+      const confirmation = await loadToolConfirmation(db, runId);
+      if (confirmation?.status === 'pending') {
+        logger.info({ runId }, 'Run still awaiting tool confirmation');
+        return;
+      }
+      if (confirmation?.status === 'denied') {
+        await db
+          .update(runs)
+          .set({ wakeReason: null, wakeAt: null, updatedAt: new Date() })
+          .where(eq(runs.id, runId));
+        await finishRun(
+          confirmation.message ??
+            'Tool execution was denied by the user. Let me know if you want a different approach.',
+          'tool_confirm_denied'
+        );
+        return;
+      }
+      if (confirmation?.status === 'approved' && confirmation.toolCall) {
+        await db
+          .update(runs)
+          .set({ wakeReason: null, wakeAt: null, updatedAt: new Date() })
+          .where(eq(runs.id, runId));
+        transcript.push({
+          type: 'system_note',
+          content: `User approved tool call ${confirmation.toolCall.name}. Executing now.`,
+        });
+        const result = await executeToolCall(
+          confirmation.toolCall,
+          {
+            runId,
+            tenantId,
+            agentId,
+            baseSeq: stepSeq,
+            toolRegistry,
+            policyEngine,
+            budgetState,
+            db,
+            logger,
+            toolConfigMap,
+            run,
+          },
+          { confirmed: true, skipCallStep: true }
+        );
+        stepSeq += 2;
+        transcript.push({ type: 'tool_result', name: confirmation.toolCall.name, result });
+        if (!result.success) {
+          const key = confirmation.toolCall.name;
+          const count = (toolFailureCounts.get(key) ?? 0) + 1;
+          toolFailureCounts.set(key, count);
+          lastToolError = {
+            tool: confirmation.toolCall.name,
+            error: typeof result.error === 'string' ? result.error : undefined,
+          };
+          limitationRequired = true;
+          limitationReason = result.error ?? 'tool_failed';
+        } else {
+          progressTick += 1;
+        }
+      }
+    }
     const inputText = (run.inputText ?? '').trim();
     const greetingPattern =
       /^(hi|hey|hello|yo|sup|hola|hallo|guten tag|good (morning|afternoon|evening))\b/i;
@@ -459,7 +495,10 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         type: 'finish',
         resultJson: { output: message, reason },
       });
-      if (run.kind !== 'subagent') {
+      const shouldSend =
+        run.kind !== 'subagent' &&
+        !(lastAssistantMessageSent && message.trim() === lastAssistantMessage.trim());
+      if (shouldSend) {
         await sendRunMessage({
           db,
           userId: run.userId,
@@ -543,6 +582,17 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           return;
         }
       }
+      budgetState.timeUsedMs = Date.now() - runStartMs;
+      if (
+        budgetState.tokensUsed > budgetState.tokensLimit ||
+        budgetState.timeUsedMs > budgetState.timeLimitMs
+      ) {
+        limitationRequired = true;
+        limitationReason = 'budget_exceeded';
+        appendSystemNoteOnce(
+          'Budget exceeded (tokens/time). Finish now with a brief limitation statement and best-effort output.'
+        );
+      }
       if (runtimeWarningSent && Date.now() - runStartMs > config.runMaxRuntimeMs * 1.5) {
         await finishRun(
           'I reached the maximum allowed runtime while working on this task. Here is the best I can do so far.',
@@ -593,6 +643,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: JSON.stringify(userPayload) },
       ];
+      budgetState.tokensUsed += estimateMessagesTokens(messagesForModel);
+      budgetState.timeUsedMs = Date.now() - runStartMs;
 
       await appendRunStep(db, {
         runId,
@@ -624,6 +676,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           messagesForModel,
           { temperature: 0 }
         );
+        budgetState.tokensUsed += Math.max(1, Math.ceil(lastResponseText.length / 4));
         if (config.runDebugPrompts) {
           logger.debug(
             { runId, iteration, attempt, responseText: lastResponseText },
@@ -741,6 +794,40 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         if (await recordIterationAndCheck('blocked:limitation', false)) {
           return;
         }
+        continue;
+      }
+
+      if (command.type === 'recover') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
+        const reason = command.reason?.trim() || 'unspecified';
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'recovery',
+          resultJson: { reason, action: command.action ?? 'retry', message: command.message ?? null },
+        });
+        transcript.push({ type: 'recovery', reason, action: command.action });
+        if (command.action === 'finish') {
+          const message =
+            command.message?.trim() ||
+            'I encountered a formatting or planning issue and stopped to avoid a bad answer.';
+          await finishRun(message, 'recover_finish');
+          return;
+        }
+        if (command.action === 'ask_user') {
+          const message =
+            command.message?.trim() ||
+            'I need clarification before I can proceed. Could you specify the missing details?';
+          await finishRun(message, 'recover_ask_user');
+          return;
+        }
+        appendSystemNoteOnce(
+          `Recovery requested: ${reason}. Continue with the JSON-only contract and take the next best action.`
+        );
         continue;
       }
 
@@ -873,11 +960,18 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           baseSeq: stepSeq,
           toolRegistry,
           policyEngine,
+          budgetState,
           db,
           logger,
           toolConfigMap,
           run,
         });
+        if (result.pending) {
+          stepSeq += 2;
+          transcript.push({ type: 'tool_result', name: toolCall.name, result });
+          logger.info({ runId, tool: toolCall.name }, 'Tool call awaiting confirmation');
+          return;
+        }
 
         stepSeq += 2;
         transcript.push({ type: 'tool_result', name: toolCall.name, result });
@@ -1019,6 +1113,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
         transcript.push({ type: 'assistant_message', content: message });
         lastAssistantMessage = message;
+        lastAssistantMessageSent = sent;
 
         const hasToolCalls = transcriptWindow.some((entry) => entry.type === 'tool_call');
         const hasOutputUpdates = transcriptWindow.some((entry) => entry.type === 'output_update');
@@ -1691,13 +1786,18 @@ interface ToolCallContext {
   baseSeq: number;
   toolRegistry: ToolRegistry;
   policyEngine: PolicyEngine;
+  budgetState: BudgetState;
   db: ReturnType<typeof getDb>;
   logger: Logger;
   toolConfigMap: Map<string, Record<string, unknown>>;
   run: typeof runs.$inferSelect;
 }
 
-async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promise<ToolResult> {
+async function executeToolCall(
+  toolCall: ToolCall,
+  ctx: ToolCallContext,
+  options?: { confirmed?: boolean; skipCallStep?: boolean }
+): Promise<ToolResult> {
   const {
     runId,
     tenantId,
@@ -1705,22 +1805,25 @@ async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promis
     baseSeq,
     toolRegistry,
     policyEngine,
+    budgetState,
     db,
     logger,
     toolConfigMap,
     run,
   } = ctx;
 
-  const callStepKey = `${runId}:call:${toolCall.id}`;
-  await db.insert(runSteps).values({
-    runId,
-    seq: baseSeq,
-    type: 'tool_call',
-    toolName: toolCall.name,
-    argsJson: toolCall.args,
-    status: 'completed',
-    idempotencyKey: callStepKey,
-  });
+  if (!options?.confirmed || !options?.skipCallStep) {
+    const callStepKey = `${runId}:call:${toolCall.id}`;
+    await db.insert(runSteps).values({
+      runId,
+      seq: baseSeq,
+      type: 'tool_call',
+      toolName: toolCall.name,
+      argsJson: toolCall.args,
+      status: 'completed',
+      idempotencyKey: callStepKey,
+    });
+  }
 
   const parsedName = parseToolCommandName(toolCall.name);
   if (!parsedName) {
@@ -1797,7 +1900,8 @@ async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promis
       args: toolCall.args,
       policyProfile: 'default',
     },
-    toolDef
+    toolDef,
+    budgetState
   );
 
   if (decision === 'deny') {
@@ -1815,6 +1919,72 @@ async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promis
       status: 'failed',
       idempotencyKey: `${runId}:result:${toolCall.id}`,
     });
+    return result;
+  }
+
+  if (decision === 'confirm' && !options?.confirmed) {
+    if (run.kind === 'subagent') {
+      const result: ToolResult = {
+        id: toolCall.id,
+        success: false,
+        error: 'Denied by policy',
+      };
+      await db.insert(runSteps).values({
+        runId,
+        seq: baseSeq + 1,
+        type: 'tool_result',
+        toolName: toolCall.name,
+        resultJson: result,
+        status: 'failed',
+        idempotencyKey: `${runId}:result:${toolCall.id}`,
+      });
+      return result;
+    }
+
+    const requestId = nanoid();
+    await db.insert(runSteps).values({
+      runId,
+      seq: baseSeq + 1,
+      type: 'tool_confirm_request',
+      toolName: toolCall.name,
+      argsJson: toolCall.args,
+      resultJson: {
+        requestId,
+        toolCall,
+        classification: commandDef.classification,
+        requestedAt: new Date().toISOString(),
+      },
+      status: 'completed',
+      idempotencyKey: `${runId}:confirm_request:${toolCall.id}`,
+    });
+    await db
+      .update(runs)
+      .set({ status: 'waiting', wakeReason: 'tool_confirm', updatedAt: new Date() })
+      .where(eq(runs.id, runId));
+
+    const confirmMessage =
+      `This action needs confirmation before I can proceed: ${toolCall.name}. ` +
+      `Approve or deny via the run confirmation API. Request ID: ${requestId}.`;
+    if (run.kind !== 'subagent') {
+      await sendRunMessage({
+        db,
+        userId: run.userId,
+        channelId: run.channelId,
+        contextId: run.contextId ?? null,
+        content: confirmMessage,
+        logger,
+        runId,
+        runKind: run.kind ?? 'coordinator',
+      });
+    }
+
+    const result: ToolResult = {
+      id: toolCall.id,
+      success: false,
+      error: 'confirmation_required',
+      pending: true,
+      result: { requestId },
+    };
     return result;
   }
 
@@ -1894,7 +2064,15 @@ async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promis
 
 function parseRunCommand(responseText: string): (RunCommand | SpawnCommand) | null {
   try {
-    const parsed = JSON.parse(responseText) as Record<string, unknown>;
+    let raw = responseText.trim();
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      const candidate = extractFirstJsonObject(raw);
+      if (!candidate) return null;
+      parsed = JSON.parse(candidate) as Record<string, unknown>;
+    }
     if (!parsed || typeof parsed !== 'object') {
       return null;
     }
@@ -1910,7 +2088,8 @@ function parseRunCommand(responseText: string): (RunCommand | SpawnCommand) | nu
         parsed.type === 'set_run_limits' ||
         parsed.type === 'spawn_subagent' ||
         parsed.type === 'spawn_subagents' ||
-        parsed.type === 'sleep'
+        parsed.type === 'sleep' ||
+        parsed.type === 'recover'
       ) {
         return parsed as RunCommand | SpawnCommand;
       }
@@ -1976,6 +2155,11 @@ function trimTranscript(transcript: TranscriptEntry[], maxEntries: number, maxTo
 
 function estimateTokens(entry: TranscriptEntry) {
   const raw = JSON.stringify(entry);
+  return Math.max(1, Math.ceil(raw.length / 4));
+}
+
+function estimateMessagesTokens(messages: OpenAIMessage[]) {
+  const raw = JSON.stringify(messages);
   return Math.max(1, Math.ceil(raw.length / 4));
 }
 
@@ -2066,6 +2250,49 @@ async function loadPriorSpawnSignatures(db: ReturnType<typeof getDb>, runId: str
   return signatures;
 }
 
+async function loadToolConfirmation(db: ReturnType<typeof getDb>, runId: string) {
+  const steps = await db
+    .select({ type: runSteps.type, seq: runSteps.seq, resultJson: runSteps.resultJson })
+    .from(runSteps)
+    .where(
+      and(
+        eq(runSteps.runId, runId),
+        inArray(runSteps.type, ['tool_confirm_request', 'tool_confirm'])
+      )
+    )
+    .orderBy(desc(runSteps.seq));
+
+  const request = steps.find((step) => step.type === 'tool_confirm_request');
+  if (!request) return null;
+  const requestJson = request.resultJson as {
+    requestId?: string;
+    toolCall?: ToolCall;
+  } | null;
+  if (!requestJson?.requestId || !requestJson.toolCall) return null;
+
+  const confirm = steps.find(
+    (step) =>
+      step.type === 'tool_confirm' &&
+      (step.resultJson as { requestId?: string } | null)?.requestId === requestJson.requestId
+  );
+  if (!confirm) {
+    return { status: 'pending' as const, requestId: requestJson.requestId };
+  }
+  const confirmJson = confirm.resultJson as { decision?: string; message?: string } | null;
+  if (confirmJson?.decision === 'approve') {
+    return {
+      status: 'approved' as const,
+      requestId: requestJson.requestId,
+      toolCall: requestJson.toolCall,
+    };
+  }
+  return {
+    status: 'denied' as const,
+    requestId: requestJson.requestId,
+    message: confirmJson?.message,
+  };
+}
+
 function truncateMemoryValue(value: string, level: number) {
   const maxCharsByLevel: Record<number, number> = {
     0: 160,
@@ -2108,6 +2335,57 @@ async function wakeParentRun(
     tenantId,
     agentId,
   });
+}
+
+function stripCodeFences(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('```')) return trimmed;
+  const lines = trimmed.split('\n');
+  if (lines.length <= 2) return trimmed;
+  const withoutFenceStart = lines.slice(1);
+  const fenceEndIndex = withoutFenceStart.findIndex((line) => line.trim().startsWith('```'));
+  if (fenceEndIndex === -1) return withoutFenceStart.join('\n').trim();
+  return withoutFenceStart.slice(0, fenceEndIndex).join('\n').trim();
+}
+
+function extractFirstJsonObject(text: string): string | null {
+  const trimmed = stripCodeFences(text);
+  if (!trimmed) return null;
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    return trimmed;
+  }
+  let inString = false;
+  let escape = false;
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < trimmed.length; i += 1) {
+    const char = trimmed[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (char === '\\\\') {
+      escape = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0 && start !== -1) {
+        return trimmed.slice(start, i + 1);
+      }
+    }
+  }
+  return null;
 }
 
 function buildToolPrompt(tools: ToolDef[], kind: string) {

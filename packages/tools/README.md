@@ -10,6 +10,7 @@ Native tool implementations that ship with Clifford agents.
 ## Public API
 - `index.ts`: `DEFAULT_TOOLS`, `NATIVE_TOOLS`, and individual tool exports.
 - `memory.ts`: Memory tool definition.
+- `retrieval.ts`: External retrieval/search tool definition.
 - `system.ts`: System tool definition.
 - `reminders.ts`: Reminders tool definition.
 - `weather.ts`: Weather tool definition.

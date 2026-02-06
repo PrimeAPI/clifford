@@ -8,6 +8,7 @@ First-party tool definitions used by Clifford agents.
 - `memory.ts`: Memory read/write tool.
 - `reminders.ts`: Reminder scheduling tool.
 - `weather.ts`: Weather lookup tool.
+- `retrieval.ts`: External retrieval/search tool.
 
 ## Guidelines
 - Keep tool definitions pure and deterministic where possible.

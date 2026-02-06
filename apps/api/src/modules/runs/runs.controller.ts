@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { getDb, runs, runSteps } from '@clifford/db';
-import { eq } from 'drizzle-orm';
+import { eq, and, desc } from 'drizzle-orm';
 import { enqueueRun } from '../../queue.js';
-import { createRunSchema, listRunsQuerySchema } from './runs.schema.js';
+import { confirmRunSchema, createRunSchema, listRunsQuerySchema } from './runs.schema.js';
 import {
   createRunRecord,
   ensureRunChannelAccess,
@@ -149,5 +149,82 @@ export async function runRoutes(app: FastifyInstance) {
     req.raw.on('close', () => {
       clearInterval(interval);
     });
+  });
+
+  // Confirm a pending tool call
+  app.post<{ Params: { id: string } }>('/api/runs/:id/confirm', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const { id } = req.params;
+    const body = confirmRunSchema.parse(req.body);
+    const db = getDb();
+
+    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    if (!run) {
+      return reply.status(404).send({ error: 'Run not found' });
+    }
+    if (run.userId !== userId) {
+      return reply.status(403).send({ error: 'Forbidden' });
+    }
+    if (run.status !== 'waiting' || run.wakeReason !== 'tool_confirm') {
+      return reply.status(409).send({ error: 'Run is not awaiting confirmation' });
+    }
+
+    const [requestStep] = await db
+      .select()
+      .from(runSteps)
+      .where(and(eq(runSteps.runId, id), eq(runSteps.type, 'tool_confirm_request')))
+      .orderBy(desc(runSteps.seq))
+      .limit(1);
+    if (!requestStep) {
+      return reply.status(409).send({ error: 'No pending confirmation request' });
+    }
+    const requestId = (requestStep.resultJson as { requestId?: string } | null)?.requestId;
+    if (body.requestId && requestId && body.requestId !== requestId) {
+      return reply.status(409).send({ error: 'Confirmation request ID mismatch' });
+    }
+
+    const [lastStep] = await db
+      .select({ seq: runSteps.seq })
+      .from(runSteps)
+      .where(eq(runSteps.runId, id))
+      .orderBy(desc(runSteps.seq))
+      .limit(1);
+    const nextSeq = lastStep ? lastStep.seq + 1 : 0;
+
+    await db.insert(runSteps).values({
+      runId: id,
+      seq: nextSeq,
+      type: 'tool_confirm',
+      resultJson: {
+        requestId: requestId ?? null,
+        decision: body.decision,
+        message: body.message ?? null,
+        decidedAt: new Date().toISOString(),
+      },
+      status: 'completed',
+      idempotencyKey: `${id}:tool_confirm:${nextSeq}`,
+    });
+
+    await db
+      .update(runs)
+      .set({
+        status: 'pending',
+        wakeReason: 'tool_confirm',
+        updatedAt: new Date(),
+      })
+      .where(eq(runs.id, id));
+
+    await enqueueRun({
+      type: 'run',
+      runId: id,
+      tenantId: run.tenantId,
+      agentId: run.agentId,
+    });
+
+    return { status: 'pending', decision: body.decision };
   });
 }

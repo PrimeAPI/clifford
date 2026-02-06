@@ -6,6 +6,8 @@
 - The Message Processor is a **direct chat** path, but the API does **not enqueue** message jobs today.
 - Memory is **prompt assembly** from `memoryItems` and context history, not external retrieval/RAG.
 - Run execution is a loop over JSON actions with explicit contracts; all state is persisted in `runs` and `run_steps`.
+- Tool calls that require confirmation pause the run and wait for user approval via the run confirmation endpoint.
+- Optional external retrieval is available via the `retrieval.search` tool (if configured).
 
 ## Mode Selection: Direct Chat vs Run
 
@@ -64,14 +66,17 @@ From `apps/api/src/routes/runs.ts`:
 
 - Each run is a loop with a hard cap: `config.runMaxIterations` (default `20` in `apps/worker/src/config.ts`).
 - LLM output must be a **single JSON object** parsed by `parseRunCommand`.
-- If parsing fails, the user gets a generic error and the run fails.
+- The parser attempts to recover JSON from fenced or noisy outputs before failing.
+- If parsing fails repeatedly, the user gets a generic error and the run fails.
 - For tool failures, retries are limited by:
   - Tool config `max_retries` if set, otherwise `config.runMaxToolRetries` (default `1`).
+- Policy `confirm` decisions trigger a confirmation request and set the run to `waiting`.
 - The loop enforces a **planning gate**:
   - Before tool calls / output / finish, the model must emit `note(category="requirements")` and `note(category="plan")`.
   - If it doesn’t, the processor injects a system note and continues.
 - If the loop stalls (no tool calls, no output, no assistant message), the processor will **force-finish** with a short fallback after `min(5, runMaxIterations - 1)` iterations.
 - If `runMaxIterations` is reached, the processor completes with a fallback message rather than throwing an error.
+- Tool calls that require confirmation (policy decision `confirm`) pause the run, emit a `tool_confirm_request` step, and set the run to `waiting` with `wakeReason: "tool_confirm"`. The run resumes only after approval via the confirmation API.
 
 ## JSON Action Contract (Run Processor)
 
@@ -90,6 +95,7 @@ From `apps/api/src/routes/runs.ts`:
 | `spawn_subagent`  | `subagent`                              | Creates a subagent run and enqueues it.                               | Usually pauses (waiting)   | `message` event `spawn_subagents` | Not directly                                     |
 | `spawn_subagents` | `subagents`                             | Creates multiple subagent runs and enqueues them.                     | Usually pauses (waiting)   | `message` event `spawn_subagents` | Not directly                                     |
 | `sleep`           | `wakeAt?` or `delaySeconds?` or `cron?` | Sets run to waiting and schedules wake/trigger.                       | No (run exits)             | `message` event `sleep`           | No                                               |
+| `recover`         | `reason`, `action?`, `message?`          | Records a recovery event and retries, finishes, or asks user.         | Depends on `action`        | `recovery`                        | Maybe                                            |
 
 ### Tool-call shortcut JSON
 
@@ -112,7 +118,7 @@ The Run Processor finishes after `send_message` if any of the following are true
 
 ## Memory, Context, and “RAG”
 
-**Key clarification:** There is **no external retrieval system** wired into either processor. Memory is built from **stored `memoryItems` and message history** and injected into the prompt.
+**Key clarification:** There is **no external retrieval system** wired into either processor by default. Memory is built from **stored `memoryItems` and message history** and injected into the prompt. Optional external retrieval is available via the `retrieval.search` tool if configured.
 
 ### Message Processor (Direct Chat)
 
@@ -168,6 +174,13 @@ The run payload for the LLM includes:
    - Executes tool calls and loop actions.
    - Sends outbound message via `sendRunMessage`, with `metadata: { source: 'run', runId, kind }`.
 
+### Tool Confirmation Flow
+
+1. A tool call triggers a policy decision of `confirm`.
+2. Run Processor writes a `tool_confirm_request` step and sets the run to `waiting` with `wakeReason: "tool_confirm"`.
+3. Client confirms via `POST /api/runs/:id/confirm` with `decision: "approve" | "deny"`.
+4. The API writes a `tool_confirm` step, re-enqueues the run, and the Run Processor executes (or denies) the pending tool call.
+
 ### Memory Write Flow (Context Compaction)
 
 1. `updateContextAfterResponse` increments `contexts.turnCount`.
@@ -183,6 +196,9 @@ The run payload for the LLM includes:
 **Source of truth:** `apps/worker/src/config.ts`, `apps/worker/src/message-processor.ts`
 
 - `config.runMaxIterations`: default `20`
+- `config.runMaxRuntimeMs`: default `120000`
+- `config.runMaxTokens`: default `80000`
+- `config.runBudgetTimeLimitMs`: default `120000`
 - `config.runTranscriptLimit`: default `50`
 - `config.runTranscriptTokenLimit`: default `1200`
 - `config.runMaxJsonRetries`: default `1`

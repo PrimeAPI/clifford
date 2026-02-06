@@ -17,6 +17,11 @@ export const config = {
   runMinIterations: parseInt(process.env.RUN_MIN_ITERATIONS || '16', 10),
   runMaxIterationsHardCap: parseInt(process.env.RUN_MAX_ITERATIONS_HARD_CAP || '200', 10),
   runMaxRuntimeMs: parseInt(process.env.RUN_MAX_RUNTIME_MS || '120000', 10),
+  runMaxTokens: parseInt(process.env.RUN_MAX_TOKENS || '80000', 10),
+  runBudgetTimeLimitMs: parseInt(
+    process.env.RUN_BUDGET_TIME_LIMIT_MS || process.env.RUN_MAX_RUNTIME_MS || '120000',
+    10
+  ),
   runTranscriptLimit: parseInt(process.env.RUN_TRANSCRIPT_LIMIT || '50', 10),
   runTranscriptTokenLimit: parseInt(process.env.RUN_TRANSCRIPT_TOKEN_LIMIT || '1200', 10),
   runMaxJsonRetries: parseInt(process.env.RUN_MAX_JSON_RETRIES || '1', 10),

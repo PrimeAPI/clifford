@@ -17,8 +17,14 @@ export class PolicyEngine {
   async decideToolCall(
     ctx: PolicyContext,
     toolDef: ToolDef,
-    _budgetState?: BudgetState
+    budgetState?: BudgetState
   ): Promise<PolicyDecision> {
+    if (budgetState) {
+      const budgetOk = await this.checkBudget(ctx, budgetState);
+      if (!budgetOk) {
+        return 'confirm';
+      }
+    }
     const command = toolDef.commands.find((entry) => entry.name === ctx.commandName);
     if (!command) {
       return 'confirm';
@@ -42,8 +48,9 @@ export class PolicyEngine {
    * TODO: Check budget constraints (tokens, time, cost)
    */
   async checkBudget(_ctx: PolicyContext, _budgetState: BudgetState): Promise<boolean> {
-    // Stub: always allow for MVP
-    return true;
+    const withinTokens = _budgetState.tokensUsed <= _budgetState.tokensLimit;
+    const withinTime = _budgetState.timeUsedMs <= _budgetState.timeLimitMs;
+    return withinTokens && withinTime;
   }
 }
 
@@ -55,11 +62,13 @@ export interface BudgetState {
   timeLimitMs: number;
 }
 
-export function createBudgetState(): BudgetState {
+export function createBudgetState(
+  overrides?: Partial<Pick<BudgetState, 'tokensLimit' | 'timeLimitMs'>>
+): BudgetState {
   return {
     tokensUsed: 0,
-    tokensLimit: 1_000_000,
+    tokensLimit: overrides?.tokensLimit ?? 1_000_000,
     timeUsedMs: 0,
-    timeLimitMs: 3600_000, // 1 hour
+    timeLimitMs: overrides?.timeLimitMs ?? 3600_000, // 1 hour
   };
 }

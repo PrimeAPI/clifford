@@ -80,6 +80,7 @@ export interface ToolResult {
   success: boolean;
   result?: unknown;
   error?: string;
+  pending?: boolean;
 }
 
 export interface ToolResolver {
@@ -114,7 +115,12 @@ export type StepType =
   | 'tool_result'
   | 'assistant_message'
   | 'output_update'
-  | 'finish';
+  | 'finish'
+  | 'tool_confirm_request'
+  | 'tool_confirm'
+  | 'budget_confirm_request'
+  | 'budget_confirm'
+  | 'recovery';
 export type StepStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 export interface Run {
