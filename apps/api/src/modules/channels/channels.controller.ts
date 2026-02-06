@@ -1,37 +1,9 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
-import { getDb, channels, users } from '@clifford/db';
+import { getDb, channels } from '@clifford/db';
 import { eq, and } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
-
-// Ensure the demo user exists (temporary until proper auth is implemented)
-async function ensureDemoUser(db: ReturnType<typeof getDb>, userId: string) {
-  const [existingUser] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-  if (!existingUser) {
-    await db
-      .insert(users)
-      .values({
-        id: userId,
-        email: 'demo@clifford.ai',
-        name: 'Demo User',
-      })
-      .onConflictDoNothing();
-  }
-}
-
-const createChannelSchema = z.object({
-  type: z.enum(['web', 'discord']),
-  name: z.string().min(1),
-  agentId: z.string().uuid().optional(),
-  config: z.record(z.unknown()).optional(),
-});
-
-const updateChannelSchema = z.object({
-  name: z.string().min(1).optional(),
-  enabled: z.boolean().optional(),
-  agentId: z.string().uuid().nullable().optional(),
-  config: z.record(z.unknown()).optional(),
-});
+import { createChannelSchema, updateChannelSchema } from './channels.schema.js';
+import { ensureDemoUser } from './channels.service.js';
 
 export async function channelRoutes(app: FastifyInstance) {
   // List channels for user (auto-creates web channel if missing)

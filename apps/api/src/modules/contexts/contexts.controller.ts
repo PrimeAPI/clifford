@@ -1,18 +1,10 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
-import { getDb, channels, contexts, messages } from '@clifford/db';
+import { getDb, channels, contexts } from '@clifford/db';
 import { eq, and, desc } from 'drizzle-orm';
-import { ensureActiveContext, createContext } from '../context.js';
-import { enqueueMemoryWrite } from '../queue.js';
-
-const listContextsQuerySchema = z.object({
-  channelId: z.string().uuid(),
-});
-
-const createContextSchema = z.object({
-  channelId: z.string().uuid(),
-  name: z.string().min(1).optional(),
-});
+import { ensureActiveContext, createContext } from '../../context.js';
+import { enqueueMemoryWrite } from '../../queue.js';
+import { createContextSchema, listContextsQuerySchema } from './contexts.schema.js';
+import { loadRecentMessages } from './contexts.service.js';
 
 export async function contextRoutes(app: FastifyInstance) {
   // List contexts for a channel
@@ -176,25 +168,4 @@ export async function contextRoutes(app: FastifyInstance) {
 
     return { closed: true };
   });
-}
-
-async function loadRecentMessages(
-  db: ReturnType<typeof getDb>,
-  contextId: string,
-  limit: number
-) {
-  const rows = await db
-    .select()
-    .from(messages)
-    .where(eq(messages.contextId, contextId))
-    .orderBy(desc(messages.createdAt))
-    .limit(limit);
-
-  return rows
-    .reverse()
-    .map((row) => ({
-      direction: row.direction,
-      content: row.content,
-      createdAt: row.createdAt?.toISOString?.() ?? undefined,
-    }));
 }

@@ -1,189 +1,24 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
 import { getDb, discordConnections, channels, messages, contexts, agents, runs } from '@clifford/db';
 import { eq, and, sql, desc } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
-import { enqueueRun, enqueueMemoryWrite } from '../queue.js';
-import { ensureActiveContext, createContext } from '../context.js';
-import { config } from '../config.js';
-
-const discordEventSchema = z.object({
-  discordUserId: z.string(),
-  discordUsername: z.string(),
-  discordAvatar: z.string().nullable().optional(),
-  content: z.string(),
-  channelId: z.string().optional(),
-  messageId: z.string().optional(),
-});
-
-const connectDiscordSchema = z.object({
-  code: z.string(),
-});
-
-const discordContextQuerySchema = z.object({
-  discordUserId: z.string(),
-  discordUsername: z.string().optional(),
-});
-
-const discordContextCreateSchema = z.object({
-  discordUserId: z.string(),
-  discordUsername: z.string().optional(),
-  name: z.string().min(1).optional(),
-});
-
-const discordContextActivateSchema = z.object({
-  discordUserId: z.string(),
-  discordUsername: z.string().optional(),
-});
-
-const normalizeStringArray = (value: unknown) =>
-  Array.isArray(value) ? value.filter((item) => typeof item === 'string') : [];
-
-const normalizeKnownUsers = (value: unknown) =>
-  Array.isArray(value)
-    ? value.filter(
-        (item) =>
-          item &&
-          typeof item === 'object' &&
-          typeof (item as { id?: unknown }).id === 'string' &&
-          typeof (item as { username?: unknown }).username === 'string'
-      )
-    : [];
-
-const normalizeUsername = (value: string) => value.trim().toLowerCase();
-
-async function resolveDiscordChannel(
-  db: ReturnType<typeof getDb>,
-  discordUserId: string,
-  discordUsername?: string
-) {
-  const normalizedDiscordUsername = discordUsername ? normalizeUsername(discordUsername) : '';
-  const normalizedDiscordUsernameBase = normalizedDiscordUsername.split('#')[0];
-
-  // Check bot DM allowlist channels for this Discord user ID or username.
-  const botChannels = await db
-    .select()
-    .from(channels)
-    .where(
-      and(
-        eq(channels.type, 'discord'),
-        sql`COALESCE(${channels.config} ->> 'mode', '') = 'bot_dm'`
-      )
-    );
-
-  for (const channel of botChannels) {
-    const config = (channel.config || {}) as Record<string, unknown>;
-    const allowedIds = normalizeStringArray(config.allowedDiscordUserIds);
-    const allowedUsernames = normalizeStringArray(config.allowedDiscordUsernames).map((name) =>
-      normalizeUsername(name)
-    );
-
-    const allowedById = allowedIds.includes(discordUserId);
-    const allowedByUsername = normalizedDiscordUsername
-      ? allowedUsernames.some((allowed) => {
-          if (allowed === normalizedDiscordUsername) return true;
-          if (allowed.includes('#')) return false;
-          return allowed === normalizedDiscordUsernameBase;
-        })
-      : false;
-
-    if (!allowedById && !allowedByUsername) continue;
-
-    const knownUsers = normalizeKnownUsers(config.knownDiscordUsers) as Array<{
-      id: string;
-      username: string;
-      avatar?: string | null;
-      lastSeenAt?: string;
-    }>;
-
-    const knownUserIndex = knownUsers.findIndex((user) => user.id === discordUserId);
-    if (knownUserIndex >= 0) {
-      knownUsers[knownUserIndex] = {
-        ...knownUsers[knownUserIndex],
-        username: discordUsername ?? knownUsers[knownUserIndex]?.username ?? '',
-        lastSeenAt: new Date().toISOString(),
-      };
-    } else if (discordUsername) {
-      knownUsers.push({
-        id: discordUserId,
-        username: discordUsername,
-        lastSeenAt: new Date().toISOString(),
-      });
-    }
-
-    if (allowedByUsername && !allowedById) {
-      allowedIds.push(discordUserId);
-    }
-
-    const nextConfig = {
-      ...config,
-      allowedDiscordUserIds: allowedIds,
-      allowedDiscordUsernames: normalizeStringArray(config.allowedDiscordUsernames),
-      knownDiscordUsers: knownUsers,
-    };
-
-    await db
-      .update(channels)
-      .set({ config: nextConfig as any, updatedAt: new Date() })
-      .where(eq(channels.id, channel.id));
-
-    return channel;
-  }
-
-  // Fall back to connected Discord accounts
-  const [connection] = await db
-    .select()
-    .from(discordConnections)
-    .where(eq(discordConnections.discordUserId, discordUserId))
-    .limit(1);
-
-  if (!connection) {
-    return null;
-  }
-
-  const [channel] = await db
-    .select()
-    .from(channels)
-    .where(
-      and(
-        eq(channels.userId, connection.userId),
-        eq(channels.type, 'discord'),
-        eq(channels.config, { discordUserId } as any)
-      )
-    )
-    .limit(1);
-
-  if (channel) {
-    return channel;
-  }
-
-  const [created] = await db
-    .insert(channels)
-    .values({
-      id: randomUUID(),
-      userId: connection.userId,
-      type: 'discord',
-      name: `Discord - ${discordUsername ?? discordUserId}`,
-      config: { discordUserId } as any,
-      enabled: true,
-    })
-    .returning();
-
-  return created ?? null;
-}
-
-function requireGatewayToken(req: { headers: Record<string, unknown> }, reply: any) {
-  if (!config.deliveryToken) {
-    reply.status(500).send({ error: 'Delivery token not configured' });
-    return false;
-  }
-  const token = req.headers['x-delivery-token'];
-  if (!token || token !== config.deliveryToken) {
-    reply.status(401).send({ error: 'Unauthorized' });
-    return false;
-  }
-  return true;
-}
+import { enqueueRun, enqueueMemoryWrite } from '../../queue.js';
+import { ensureActiveContext, createContext } from '../../context.js';
+import { config } from '../../config.js';
+import {
+  connectDiscordSchema,
+  discordContextActivateSchema,
+  discordContextCreateSchema,
+  discordContextQuerySchema,
+  discordEventSchema,
+} from './discord.schema.js';
+import {
+  normalizeDiscordKnownUsers,
+  normalizeDiscordStringArray,
+  normalizeDiscordUsername,
+  requireGatewayToken,
+  resolveDiscordChannel,
+} from './discord.service.js';
 
 export async function discordRoutes(app: FastifyInstance) {
   // OAuth callback
@@ -248,7 +83,7 @@ export async function discordRoutes(app: FastifyInstance) {
   app.post('/api/discord/webhook', async (req, reply) => {
     const body = discordEventSchema.parse(req.body);
     const db = getDb();
-    const normalizedDiscordUsername = normalizeUsername(body.discordUsername);
+    const normalizedDiscordUsername = normalizeDiscordUsername(body.discordUsername);
     const normalizedDiscordUsernameBase = normalizedDiscordUsername.split('#')[0];
 
     // Check bot DM allowlist channels for this Discord user ID or username.
@@ -268,9 +103,9 @@ export async function discordRoutes(app: FastifyInstance) {
 
     for (const channel of botChannels) {
       const config = (channel.config || {}) as Record<string, unknown>;
-      const allowedIds = normalizeStringArray(config.allowedDiscordUserIds);
-      const allowedUsernames = normalizeStringArray(config.allowedDiscordUsernames).map((name) =>
-        normalizeUsername(name)
+      const allowedIds = normalizeDiscordStringArray(config.allowedDiscordUserIds);
+      const allowedUsernames = normalizeDiscordStringArray(config.allowedDiscordUsernames).map(
+        (name) => normalizeDiscordUsername(name)
       );
 
       const allowedById = allowedIds.includes(body.discordUserId);
@@ -284,7 +119,7 @@ export async function discordRoutes(app: FastifyInstance) {
 
       allowlistedChannel = channel;
 
-      const knownUsers = normalizeKnownUsers(config.knownDiscordUsers) as Array<{
+      const knownUsers = normalizeDiscordKnownUsers(config.knownDiscordUsers) as Array<{
         id: string;
         username: string;
         avatar?: string | null;
@@ -315,7 +150,7 @@ export async function discordRoutes(app: FastifyInstance) {
       nextConfig = {
         ...config,
         allowedDiscordUserIds: allowedIds,
-        allowedDiscordUsernames: normalizeStringArray(config.allowedDiscordUsernames),
+        allowedDiscordUsernames: normalizeDiscordStringArray(config.allowedDiscordUsernames),
         knownDiscordUsers: knownUsers,
       };
       shouldPersistConfig = true;

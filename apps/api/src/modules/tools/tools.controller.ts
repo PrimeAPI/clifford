@@ -1,26 +1,8 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
 import { getDb, userToolSettings } from '@clifford/db';
 import { and, eq } from 'drizzle-orm';
-import { NATIVE_TOOLS } from '@clifford/tools';
-import { getAllPlugins } from '@clifford/plugins';
-import type { ToolDef } from '@clifford/sdk';
-
-const updateToolSchema = z.object({
-  enabled: z.boolean().optional(),
-  pinned: z.boolean().optional(),
-  important: z.boolean().optional(),
-  config: z.record(z.unknown()).optional(),
-});
-
-function loadAllTools(): ToolDef[] {
-  const pluginTools = getAllPlugins().flatMap((plugin) => plugin.tools);
-  const byName = new Map<string, ToolDef>();
-  for (const tool of [...NATIVE_TOOLS, ...pluginTools]) {
-    byName.set(tool.name, tool);
-  }
-  return Array.from(byName.values());
-}
+import { updateToolSchema } from './tools.schema.js';
+import { loadAllTools } from './tools.service.js';
 
 export async function toolRoutes(app: FastifyInstance) {
   app.get('/api/tools', async (req, reply) => {
