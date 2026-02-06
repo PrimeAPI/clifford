@@ -53,3 +53,9 @@
     @apply bg-background text-foreground;
   }
 }
+
+@layer components {
+  .landing-feature-card {
+    @apply rounded-lg border border-border bg-card p-6 text-left shadow-sm;
+  }
+}
