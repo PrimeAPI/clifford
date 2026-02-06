@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, boolean } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, boolean, jsonb } from 'drizzle-orm/pg-core';
 import { tenants } from './tenants';
 
 export const agents = pgTable('agents', {
@@ -9,6 +9,8 @@ export const agents = pgTable('agents', {
   name: text('name').notNull(),
   enabled: boolean('enabled').notNull().default(true),
   policyProfile: text('policy_profile').notNull().default('default'),
+  // Agent-specific model routing configuration overrides
+  routingConfig: jsonb('routing_config'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
 });
 

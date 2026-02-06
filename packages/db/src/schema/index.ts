@@ -18,3 +18,6 @@ export * from './contexts';
 export * from './messages';
 export * from './discord-connections';
 export * from './discord-outbox';
+export * from './document-chunks';
+export * from './policy-rules';
+export * from './quota-usage';

@@ -17,3 +17,11 @@ export const confirmRunSchema = z.object({
   requestId: z.string().optional(),
   message: z.string().optional(),
 });
+
+export const cancelRunSchema = z.object({
+  reason: z.string().optional(),
+});
+
+export const pauseRunSchema = z.object({
+  reason: z.string().optional(),
+});

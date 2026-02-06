@@ -1,17 +1,57 @@
 import type { ToolDef, ToolCommandDef, Plugin, Logger } from '@clifford/sdk';
 import { NATIVE_TOOLS } from '@clifford/tools';
 import { getPlugin, getAllPlugins } from '@clifford/plugins';
+import { ProcessSandbox, type SandboxConfig } from '@clifford/sandbox';
+
+export interface ToolSandboxConfig {
+  enabled: boolean;
+  config?: Partial<SandboxConfig>;
+}
 
 export class ToolRegistry {
   private tools = new Map<string, ToolDef>();
+  private sandboxConfigs = new Map<string, ToolSandboxConfig>();
+  private sandbox?: ProcessSandbox;
   private logger?: Logger;
 
   constructor(logger?: Logger) {
     this.logger = logger;
-    // Register core tools
+    // Register core tools (native tools are trusted, no sandbox)
     for (const tool of NATIVE_TOOLS) {
       this.tools.set(tool.name, tool);
     }
+  }
+
+  /**
+   * Configure sandboxing for a specific tool.
+   */
+  setSandboxConfig(toolName: string, config: ToolSandboxConfig): void {
+    this.sandboxConfigs.set(toolName, config);
+  }
+
+  /**
+   * Check if a tool should be sandboxed.
+   */
+  shouldSandbox(toolName: string): boolean {
+    const config = this.sandboxConfigs.get(toolName);
+    return config?.enabled ?? false;
+  }
+
+  /**
+   * Get the sandbox instance, creating it if needed.
+   */
+  getSandbox(): ProcessSandbox {
+    if (!this.sandbox) {
+      this.sandbox = new ProcessSandbox();
+    }
+    return this.sandbox;
+  }
+
+  /**
+   * Get sandbox config for a tool.
+   */
+  getSandboxConfig(toolName: string): Partial<SandboxConfig> | undefined {
+    return this.sandboxConfigs.get(toolName)?.config;
   }
 
   async loadPlugins(pluginNames: string[]): Promise<string[]> {

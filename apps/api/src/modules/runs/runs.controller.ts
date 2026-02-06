@@ -2,7 +2,13 @@ import type { FastifyInstance } from 'fastify';
 import { getDb, runs, runSteps } from '@clifford/db';
 import { eq, and, desc } from 'drizzle-orm';
 import { enqueueRun } from '../../queue.js';
-import { confirmRunSchema, createRunSchema, listRunsQuerySchema } from './runs.schema.js';
+import {
+  cancelRunSchema,
+  confirmRunSchema,
+  createRunSchema,
+  listRunsQuerySchema,
+  pauseRunSchema,
+} from './runs.schema.js';
 import {
   createRunRecord,
   ensureRunChannelAccess,
@@ -226,5 +232,128 @@ export async function runRoutes(app: FastifyInstance) {
     });
 
     return { status: 'pending', decision: body.decision };
+  });
+
+  // Cancel a run
+  app.post<{ Params: { id: string } }>('/api/runs/:id/cancel', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const { id } = req.params;
+    const body = cancelRunSchema.parse(req.body ?? {});
+    const db = getDb();
+
+    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    if (!run) {
+      return reply.status(404).send({ error: 'Run not found' });
+    }
+    if (run.userId !== userId) {
+      return reply.status(403).send({ error: 'Forbidden' });
+    }
+
+    // Only allow cancelling runs that are in progress
+    if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled') {
+      return reply.status(409).send({ error: `Cannot cancel run with status: ${run.status}` });
+    }
+
+    await db
+      .update(runs)
+      .set({
+        status: 'cancelled',
+        cancelReason: body.reason ?? null,
+        cancelRequestedAt: new Date(),
+        cancelRequestedBy: userId,
+        updatedAt: new Date(),
+      })
+      .where(eq(runs.id, id));
+
+    app.log.info({ runId: id, userId, reason: body.reason }, 'Run cancelled');
+
+    return { status: 'cancelled', runId: id };
+  });
+
+  // Pause a running run
+  app.post<{ Params: { id: string } }>('/api/runs/:id/pause', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const { id } = req.params;
+    const body = pauseRunSchema.parse(req.body ?? {});
+    const db = getDb();
+
+    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    if (!run) {
+      return reply.status(404).send({ error: 'Run not found' });
+    }
+    if (run.userId !== userId) {
+      return reply.status(403).send({ error: 'Forbidden' });
+    }
+
+    // Only allow pausing runs that are pending or running
+    if (run.status !== 'pending' && run.status !== 'running') {
+      return reply.status(409).send({ error: `Cannot pause run with status: ${run.status}` });
+    }
+
+    await db
+      .update(runs)
+      .set({
+        status: 'waiting',
+        wakeReason: body.reason ?? 'paused',
+        updatedAt: new Date(),
+      })
+      .where(eq(runs.id, id));
+
+    app.log.info({ runId: id, userId, reason: body.reason }, 'Run paused');
+
+    return { status: 'waiting', runId: id };
+  });
+
+  // Resume a paused run
+  app.post<{ Params: { id: string } }>('/api/runs/:id/resume', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const { id } = req.params;
+    const db = getDb();
+
+    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    if (!run) {
+      return reply.status(404).send({ error: 'Run not found' });
+    }
+    if (run.userId !== userId) {
+      return reply.status(403).send({ error: 'Forbidden' });
+    }
+
+    // Only allow resuming runs that are waiting
+    if (run.status !== 'waiting') {
+      return reply.status(409).send({ error: `Cannot resume run with status: ${run.status}` });
+    }
+
+    await db
+      .update(runs)
+      .set({
+        status: 'pending',
+        wakeReason: 'resumed',
+        updatedAt: new Date(),
+      })
+      .where(eq(runs.id, id));
+
+    // Re-enqueue the run
+    await enqueueRun({
+      type: 'run',
+      runId: id,
+      tenantId: run.tenantId,
+      agentId: run.agentId,
+    });
+
+    app.log.info({ runId: id, userId }, 'Run resumed');
+
+    return { status: 'pending', runId: id };
   });
 }

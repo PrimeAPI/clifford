@@ -15,7 +15,9 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
-    "@clifford/sdk": "workspace:*"
+    "@clifford/db": "workspace:*",
+    "@clifford/sdk": "workspace:*",
+    "drizzle-orm": "^0.36.4"
   },
   "devDependencies": {
     "typescript": "^5.7.2"

@@ -1,6 +1,11 @@
 import type { Job } from 'bullmq';
 import type { Logger, RunJob, ToolCall, ToolResult, ToolDef } from '@clifford/sdk';
-import { parseToolCommandName } from '@clifford/sdk';
+import {
+  parseToolCommandName,
+  commandSchema,
+  commandJsonSchema,
+  type Command,
+} from '@clifford/sdk';
 import {
   getDb,
   runs,
@@ -12,6 +17,7 @@ import {
   memoryItems,
   userToolSettings,
   triggers,
+  agents,
 } from '@clifford/db';
 import { eq, and, desc, inArray } from 'drizzle-orm';
 import { PolicyEngine, createBudgetState, type BudgetState } from '@clifford/policy';
@@ -19,10 +25,17 @@ import { ToolRegistry } from './tool-registry.js';
 import { nanoid } from 'nanoid';
 import { config } from './config.js';
 import { decryptSecret } from '@clifford/core';
-import { callOpenAIWithFallback, type OpenAIMessage } from './openai-client.js';
+import {
+  callOpenAIWithFallback,
+  callOpenAIStructuredWithFallback,
+  supportsStructuredOutputs,
+  type OpenAIMessage,
+} from './openai-client.js';
 import { ZodError } from 'zod';
 import { enqueueDelivery, enqueueRun } from './queues.js';
 import { randomUUID } from 'crypto';
+import { ModelRouter, createRoutingConfig, type RoutingConfig } from './model-router.js';
+import { classifyTask, type TaskType } from './task-classifier.js';
 
 type RunCommand =
   | {
@@ -233,6 +246,17 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     if (provider !== 'openai') {
       throw new Error(`Unsupported LLM provider: ${provider}`);
     }
+
+    // 6. Load routing configuration (from agent or user settings)
+    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
+    const routingConfig: RoutingConfig | null =
+      (agent?.routingConfig as RoutingConfig | null) ??
+      (settings.routingConfig as RoutingConfig | null) ??
+      null;
+
+    // Create model router if routing config is available
+    const modelRouter = routingConfig ? new ModelRouter(apiKey, routingConfig) : null;
+    let currentTaskType: TaskType = 'plan';
 
     const toolDescriptions = buildToolPrompt(toolRegistry.getAllTools(), run.kind ?? 'coordinator');
 
@@ -568,6 +592,21 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     };
 
     for (let iteration = 0; iteration < hardCap; iteration += 1) {
+      // Check for cancellation at the start of each iteration
+      const freshRunCheck = await db.select().from(runs).where(eq(runs.id, runId)).limit(1);
+      const currentStatus = freshRunCheck[0]?.status;
+      if (currentStatus === 'cancelled') {
+        logger.info({ runId, iteration }, 'Run was cancelled');
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: { event: 'cancelled', iteration, reason: freshRunCheck[0]?.cancelReason },
+        });
+        // Run is already marked as cancelled, just exit
+        return;
+      }
+
       if (Date.now() - runStartMs > config.runMaxRuntimeMs) {
         if (!runtimeWarningSent) {
           runtimeWarningSent = true;
@@ -666,41 +705,118 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         );
       }
 
-      let command: RunCommand | null = null;
+      let command: RunCommand | SpawnCommand | null = null;
       let lastResponseText = '';
-      for (let attempt = 0; attempt <= config.runMaxJsonRetries; attempt += 1) {
-        lastResponseText = await callOpenAIWithFallback(
-          apiKey,
-          model,
-          fallbackModel,
-          messagesForModel,
-          { temperature: 0 }
-        );
-        budgetState.tokensUsed += Math.max(1, Math.ceil(lastResponseText.length / 4));
-        if (config.runDebugPrompts) {
-          logger.debug(
-            { runId, iteration, attempt, responseText: lastResponseText },
-            'Run model response'
+      const useStructuredOutputs = supportsStructuredOutputs(model);
+
+      if (useStructuredOutputs) {
+        // Use structured outputs for guaranteed valid JSON
+        try {
+          const parsedCommand = await callOpenAIStructuredWithFallback<Command>(
+            apiKey,
+            model,
+            fallbackModel,
+            messagesForModel,
+            {
+              name: 'run_command',
+              description: 'A command for the agent to execute',
+              strict: true,
+              schema: commandJsonSchema,
+            },
+            { temperature: 0 }
+          );
+          lastResponseText = JSON.stringify(parsedCommand);
+          budgetState.tokensUsed += Math.max(1, Math.ceil(lastResponseText.length / 4));
+          if (config.runDebugPrompts) {
+            logger.debug(
+              { runId, iteration, responseText: lastResponseText },
+              'Run model response (structured)'
+            );
+          }
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: {
+              event: 'llm_response',
+              iteration,
+              attempt: 0,
+              responseText: lastResponseText,
+              structured: true,
+            },
+          });
+          // Validate with Zod schema for extra safety
+          const validated = commandSchema.safeParse(parsedCommand);
+          if (validated.success) {
+            command = validated.data as RunCommand | SpawnCommand;
+          } else {
+            logger.warn(
+              { runId, iteration, errors: validated.error.issues },
+              'Structured output failed Zod validation'
+            );
+            command = parseRunCommand(lastResponseText);
+          }
+        } catch (err) {
+          // Fall back to regular parsing if structured output fails
+          logger.warn({ runId, iteration, error: err }, 'Structured output call failed, falling back');
+          lastResponseText = await callOpenAIWithFallback(
+            apiKey,
+            model,
+            fallbackModel,
+            messagesForModel,
+            { temperature: 0 }
+          );
+          budgetState.tokensUsed += Math.max(1, Math.ceil(lastResponseText.length / 4));
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: {
+              event: 'llm_response',
+              iteration,
+              attempt: 0,
+              responseText: lastResponseText,
+              structured: false,
+            },
+          });
+          command = parseRunCommand(lastResponseText);
+        }
+      } else {
+        // Use traditional JSON parsing with retries
+        for (let attempt = 0; attempt <= config.runMaxJsonRetries; attempt += 1) {
+          lastResponseText = await callOpenAIWithFallback(
+            apiKey,
+            model,
+            fallbackModel,
+            messagesForModel,
+            { temperature: 0 }
+          );
+          budgetState.tokensUsed += Math.max(1, Math.ceil(lastResponseText.length / 4));
+          if (config.runDebugPrompts) {
+            logger.debug(
+              { runId, iteration, attempt, responseText: lastResponseText },
+              'Run model response'
+            );
+          }
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: {
+              event: 'llm_response',
+              iteration,
+              attempt,
+              responseText: lastResponseText,
+            },
+          });
+          command = parseRunCommand(lastResponseText);
+          if (command) {
+            break;
+          }
+          appendSystemNoteOnce(
+            'Invalid JSON response received. Please reply with a single valid JSON command object only.'
           );
         }
-        await appendRunStep(db, {
-          runId,
-          seq: stepSeq++,
-          type: 'message',
-          resultJson: {
-            event: 'llm_response',
-            iteration,
-            attempt,
-            responseText: lastResponseText,
-          },
-        });
-        command = parseRunCommand(lastResponseText);
-        if (command) {
-          break;
-        }
-        appendSystemNoteOnce(
-          'Invalid JSON response received. Please reply with a single valid JSON command object only.'
-        );
       }
 
       if (!command) {
@@ -2077,6 +2193,13 @@ function parseRunCommand(responseText: string): (RunCommand | SpawnCommand) | nu
       return null;
     }
 
+    // First, try to validate with Zod schema
+    const schemaResult = commandSchema.safeParse(parsed);
+    if (schemaResult.success) {
+      return schemaResult.data as RunCommand | SpawnCommand;
+    }
+
+    // Fall back to legacy parsing for backwards compatibility with non-standard formats
     if (typeof parsed.type === 'string') {
       if (
         parsed.type === 'tool_call' ||
@@ -2094,6 +2217,7 @@ function parseRunCommand(responseText: string): (RunCommand | SpawnCommand) | nu
         return parsed as RunCommand | SpawnCommand;
       }
 
+      // Handle shorthand tool call format: {"type": "tool.command", "args": {...}}
       const toolName = parseToolCommandName(parsed.type);
       if (toolName) {
         return {
@@ -2104,6 +2228,7 @@ function parseRunCommand(responseText: string): (RunCommand | SpawnCommand) | nu
       }
     }
 
+    // Handle alternative tool call format: {"name": "tool.command", "args": {...}}
     if (typeof parsed.name === 'string') {
       const toolName = parseToolCommandName(parsed.name);
       if (toolName) {

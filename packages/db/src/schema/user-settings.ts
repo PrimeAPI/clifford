@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid, boolean, integer } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, uuid, boolean, integer, jsonb } from 'drizzle-orm/pg-core';
 import { users } from './users';
 
 export const userSettings = pgTable('user_settings', {
@@ -22,6 +22,8 @@ export const userSettings = pgTable('user_settings', {
   crossChannelContextEnabled: boolean('cross_channel_context_enabled').notNull().default(true),
   crossChannelContextLimit: integer('cross_channel_context_limit').notNull().default(12),
   memoryEnabled: boolean('memory_enabled').notNull().default(true),
+  // Model routing configuration for task phases (planner, executor, verifier)
+  routingConfig: jsonb('routing_config'),
   createdAt: timestamp('created_at').notNull().defaultNow(),
   updatedAt: timestamp('updated_at').notNull().defaultNow(),
 });

@@ -14,6 +14,7 @@ import { queueRoutes } from './modules/queue/queue.controller.js';
 import { deliveryRoutes } from './modules/deliveries/deliveries.controller.js';
 import { memoryRoutes } from './modules/memories/memories.controller.js';
 import { toolRoutes } from './modules/tools/tools.controller.js';
+import { policyRoutes } from './modules/policies/policies.controller.js';
 
 export function createApp() {
   const app = Fastify({
@@ -34,6 +35,7 @@ export function createApp() {
   app.register(settingsRoutes);
   app.register(memoryRoutes);
   app.register(toolRoutes);
+  app.register(policyRoutes);
   app.register(queueRoutes);
   app.register(deliveryRoutes);
 

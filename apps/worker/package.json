@@ -15,6 +15,7 @@
     "@clifford/db": "workspace:*",
     "@clifford/plugins": "workspace:*",
     "@clifford/policy": "workspace:*",
+    "@clifford/sandbox": "workspace:*",
     "@clifford/sdk": "workspace:*",
     "@clifford/tools": "workspace:*",
     "bullmq": "^5.32.2",
