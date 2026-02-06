@@ -7,6 +7,13 @@ import { processMessage } from './message-processor.js';
 import { processDeliveryAck } from './delivery-ack-processor.js';
 import { processMemoryWrite } from './memory-write-processor.js';
 import { processWake } from './wake-processor.js';
+import {
+  QUEUE_DELIVERY_ACKS,
+  QUEUE_MEMORY_WRITES,
+  QUEUE_MESSAGES,
+  QUEUE_RUNS,
+  QUEUE_WAKE,
+} from '@clifford/core';
 
 const logger = pino({ level: config.logLevel });
 
@@ -15,7 +22,7 @@ const connection = {
 };
 
 const runWorker = new Worker<RunJob>(
-  'clifford-runs',
+  QUEUE_RUNS,
   async (job) => {
     await processRun(job, logger);
   },
@@ -26,7 +33,7 @@ const runWorker = new Worker<RunJob>(
 );
 
 const messageWorker = new Worker<MessageJob>(
-  'clifford-messages',
+  QUEUE_MESSAGES,
   async (job) => {
     await processMessage(job, logger);
   },
@@ -37,7 +44,7 @@ const messageWorker = new Worker<MessageJob>(
 );
 
 const deliveryAckWorker = new Worker<DeliveryAckJob>(
-  'clifford-delivery-acks',
+  QUEUE_DELIVERY_ACKS,
   async (job) => {
     await processDeliveryAck(job, logger);
   },
@@ -48,7 +55,7 @@ const deliveryAckWorker = new Worker<DeliveryAckJob>(
 );
 
 const memoryWriteWorker = new Worker<MemoryWriteJob>(
-  'clifford-memory-writes',
+  QUEUE_MEMORY_WRITES,
   async (job) => {
     return await processMemoryWrite(job, logger);
   },
@@ -59,7 +66,7 @@ const memoryWriteWorker = new Worker<MemoryWriteJob>(
 );
 
 const wakeWorker = new Worker<WakeJob>(
-  'clifford-wake',
+  QUEUE_WAKE,
   async (job) => {
     return await processWake(job, logger);
   },
@@ -111,23 +118,23 @@ wakeWorker.on('failed', (job, err) => {
 
 logger.info(
   { concurrency: config.workerConcurrency },
-  'Worker started, listening for jobs on clifford-runs'
+  `Worker started, listening for jobs on ${QUEUE_RUNS}`
 );
 logger.info(
   { concurrency: config.workerConcurrency },
-  'Worker started, listening for jobs on clifford-messages'
+  `Worker started, listening for jobs on ${QUEUE_MESSAGES}`
 );
 logger.info(
   { concurrency: config.workerConcurrency },
-  'Worker started, listening for jobs on clifford-delivery-acks'
+  `Worker started, listening for jobs on ${QUEUE_DELIVERY_ACKS}`
 );
 logger.info(
   { concurrency: config.workerConcurrency },
-  'Worker started, listening for jobs on clifford-memory-writes'
+  `Worker started, listening for jobs on ${QUEUE_MEMORY_WRITES}`
 );
 logger.info(
   { concurrency: config.workerConcurrency },
-  'Worker started, listening for jobs on clifford-wake'
+  `Worker started, listening for jobs on ${QUEUE_WAKE}`
 );
 
 // Graceful shutdown

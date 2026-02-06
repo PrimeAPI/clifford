@@ -18,7 +18,7 @@ import { PolicyEngine } from '@clifford/policy';
 import { ToolRegistry } from './tool-registry.js';
 import { nanoid } from 'nanoid';
 import { config } from './config.js';
-import { decryptSecret } from './crypto.js';
+import { decryptSecret } from '@clifford/core';
 import { callOpenAIWithFallback, type OpenAIMessage } from './openai-client.js';
 import { ZodError } from 'zod';
 import { enqueueDelivery, enqueueRun } from './queues.js';

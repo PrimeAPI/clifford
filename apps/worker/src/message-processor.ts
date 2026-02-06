@@ -5,7 +5,7 @@ import { eq, and, desc, ne, asc, inArray, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { config } from './config.js';
 import { enqueueDelivery, enqueueMemoryWrite } from './queues.js';
-import { decryptSecret } from './crypto.js';
+import { decryptSecret } from '@clifford/core';
 import { callOpenAIWithFallback, type OpenAIMessage } from './openai-client.js';
 
 const DEFAULT_SYSTEM_PROMPT =

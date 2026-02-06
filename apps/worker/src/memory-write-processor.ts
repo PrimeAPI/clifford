@@ -3,7 +3,7 @@ import type { Logger, MemoryWriteJob } from '@clifford/sdk';
 import { getDb, memoryItems, messages, userSettings } from '@clifford/db';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { config } from './config.js';
-import { decryptSecret } from './crypto.js';
+import { decryptSecret } from '@clifford/core';
 import { callOpenAIWithFallback, type OpenAIMessage } from './openai-client.js';
 import { z } from 'zod';
 

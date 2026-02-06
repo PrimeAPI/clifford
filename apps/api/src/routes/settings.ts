@@ -4,7 +4,7 @@ import { getDb, users, userSettings } from '@clifford/db';
 import { eq } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { config } from '../config.js';
-import { encryptSecret } from '../crypto.js';
+import { encryptSecret } from '@clifford/core';
 
 const llmSettingsSchema = z.object({
   provider: z.enum(['openai']).optional(),

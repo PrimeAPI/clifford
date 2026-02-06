@@ -11,6 +11,7 @@
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {
+    "@clifford/core": "workspace:*",
     "@clifford/db": "workspace:*",
     "@clifford/tools": "workspace:*",
     "@clifford/plugins": "workspace:*",
