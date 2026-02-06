@@ -144,7 +144,11 @@ export default function ToolsPage() {
                   size="sm"
                   onClick={() => setExpanded(isOpen ? null : tool.name)}
                 >
-                  {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  {isOpen ? (
+                    <ChevronDown className="h-4 w-4" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4" />
+                  )}
                 </Button>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -205,7 +209,9 @@ export default function ToolsPage() {
                                 <input
                                   type="checkbox"
                                   checked={Boolean(draft[field.key])}
-                                  onChange={(e) => updateDraft(tool.name, field.key, e.target.checked)}
+                                  onChange={(e) =>
+                                    updateDraft(tool.name, field.key, e.target.checked)
+                                  }
                                   disabled={!tool.enabled}
                                 />
                                 Enabled
@@ -226,7 +232,13 @@ export default function ToolsPage() {
                               </select>
                             ) : (
                               <Input
-                                type={field.type === 'number' ? 'number' : field.type === 'secret' ? 'password' : 'text'}
+                                type={
+                                  field.type === 'number'
+                                    ? 'number'
+                                    : field.type === 'secret'
+                                      ? 'password'
+                                      : 'text'
+                                }
                                 value={(draft[field.key] as string | number | undefined) ?? ''}
                                 onChange={(e) =>
                                   updateDraft(

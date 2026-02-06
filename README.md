@@ -49,6 +49,7 @@ docker compose up -d
 ```
 
 This starts:
+
 - Postgres on port 5433
 - Redis on port 6379
 - MinIO on ports 9000/9001
@@ -80,6 +81,7 @@ pnpm dev
 ```
 
 This starts:
+
 - API server on http://localhost:3000
 - Worker (background process)
 - Scheduler (background process)
@@ -100,6 +102,7 @@ curl -X POST http://localhost:3000/api/runs \
 ```
 
 Response:
+
 ```json
 {
   "runId": "abc123",

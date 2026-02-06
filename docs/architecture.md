@@ -1,6 +1,7 @@
 # Clifford Architecture (Code-Backed Spec)
 
 ## Summary
+
 - The API creates **Runs** for inbound messages; Run Processor executes tool-aware, multi-step workflows.
 - The Message Processor is a **direct chat** path, but the API does **not enqueue** message jobs today.
 - Memory is **prompt assembly** from `memoryItems` and context history, not external retrieval/RAG.
@@ -18,6 +19,7 @@
 - If **no enabled agent** is found, the API inserts an outbound error message and returns 500.
 
 **Direct Chat path (Message Processor):**
+
 - The worker has a `processMessage` implementation in `apps/worker/src/message-processor.ts` that handles message jobs from the `clifford-messages` queue.
 - **There is no enqueue path in the API routes** that currently calls `enqueueMessage`. As a result, **direct chat is not used by `/api/messages`**.
 - Inference: direct chat may be used by other job producers outside the API routes (none are present in this repo). If you expect direct chat, add a queue producer or expose a route that uses `enqueueMessage`.
@@ -40,6 +42,7 @@ stateDiagram-v2
 ```
 
 ### Status values written by code
+
 - `pending` (created or re-queued): `apps/api/src/routes/messages.ts`, `apps/api/src/routes/runs.ts`, `apps/worker/src/wake-processor.ts`
 - `running`: `apps/worker/src/run-processor.ts`
 - `waiting`: `apps/worker/src/run-processor.ts` (sleep or subagent waiting)
@@ -49,7 +52,9 @@ stateDiagram-v2
 **Inference:** `cancelled` is referenced in the SSE endpoint (`apps/api/src/routes/runs.ts`) but no code sets this status in the repo.
 
 ### Persisted run fields (as read by API)
+
 From `apps/api/src/routes/runs.ts`:
+
 - `runs`: `id`, `agentId`, `channelId`, `userId`, `contextId`, `parentRunId`, `rootRunId`, `kind`, `profile`, `inputText`, `inputJson`, `outputText`, `allowedTools`, `wakeAt`, `wakeReason`, `status`, `createdAt`, `updatedAt`
 - `run_steps`: full list for a run, ordered by `seq`
 
@@ -74,21 +79,22 @@ From `apps/api/src/routes/runs.ts`:
 
 ### Command types
 
-| type | Required fields | Effect | Loop continues? | Transcript entry | User-visible output |
-| --- | --- | --- | --- | --- | --- |
-| `tool_call` | `name`, `args?` | Execute tool call via ToolRegistry. Applies policy. | Yes | `tool_call` + `tool_result` | Only if tool result is later used to send/finish |
-| `send_message` | `message` | Sends a message to user; may also finish run depending on conditions. | Often finishes (see below) | `assistant_message` | Yes |
-| `set_output` | `output`, `mode?` | Updates `outputText` buffer (`replace`/`append`). | Yes | `output_update` | Not until `finish` |
-| `finish` | `output?`, `mode?` | Finalizes run, sends output to user. | No | `finish` | Yes |
-| `decision` | `content`, `importance?` | Records a decision in run steps. | Yes | `decision` | No |
-| `note` | `category`, `content` | Records structured note in run steps. | Yes | `note` | No |
-| `spawn_subagent` | `subagent` | Creates a subagent run and enqueues it. | Usually pauses (waiting) | `message` event `spawn_subagents` | Not directly |
-| `spawn_subagents` | `subagents` | Creates multiple subagent runs and enqueues them. | Usually pauses (waiting) | `message` event `spawn_subagents` | Not directly |
-| `sleep` | `wakeAt?` or `delaySeconds?` or `cron?` | Sets run to waiting and schedules wake/trigger. | No (run exits) | `message` event `sleep` | No |
+| type              | Required fields                         | Effect                                                                | Loop continues?            | Transcript entry                  | User-visible output                              |
+| ----------------- | --------------------------------------- | --------------------------------------------------------------------- | -------------------------- | --------------------------------- | ------------------------------------------------ |
+| `tool_call`       | `name`, `args?`                         | Execute tool call via ToolRegistry. Applies policy.                   | Yes                        | `tool_call` + `tool_result`       | Only if tool result is later used to send/finish |
+| `send_message`    | `message`                               | Sends a message to user; may also finish run depending on conditions. | Often finishes (see below) | `assistant_message`               | Yes                                              |
+| `set_output`      | `output`, `mode?`                       | Updates `outputText` buffer (`replace`/`append`).                     | Yes                        | `output_update`                   | Not until `finish`                               |
+| `finish`          | `output?`, `mode?`                      | Finalizes run, sends output to user.                                  | No                         | `finish`                          | Yes                                              |
+| `decision`        | `content`, `importance?`                | Records a decision in run steps.                                      | Yes                        | `decision`                        | No                                               |
+| `note`            | `category`, `content`                   | Records structured note in run steps.                                 | Yes                        | `note`                            | No                                               |
+| `spawn_subagent`  | `subagent`                              | Creates a subagent run and enqueues it.                               | Usually pauses (waiting)   | `message` event `spawn_subagents` | Not directly                                     |
+| `spawn_subagents` | `subagents`                             | Creates multiple subagent runs and enqueues them.                     | Usually pauses (waiting)   | `message` event `spawn_subagents` | Not directly                                     |
+| `sleep`           | `wakeAt?` or `delaySeconds?` or `cron?` | Sets run to waiting and schedules wake/trigger.                       | No (run exits)             | `message` event `sleep`           | No                                               |
 
 ### Tool-call shortcut JSON
 
 If the model responds with a JSON object that has:
+
 - `type: "<toolName.command>"`, or
 - `name: "<toolName.command>"`,
 
@@ -97,6 +103,7 @@ then `parseRunCommand` treats it as a `tool_call` with `args` from `args`.
 ### `send_message` completion behavior
 
 The Run Processor finishes after `send_message` if any of the following are true:
+
 - It is a **subagent** run (always finishes).
 - The message is identical to the previous assistant message.
 - The message is a question (ends in `?` or matches `/bitte|please|could you|can you/i`).
@@ -112,6 +119,7 @@ The Run Processor finishes after `send_message` if any of the following are true
 **Source of truth:** `apps/worker/src/message-processor.ts`
 
 Conversation assembly order:
+
 1. `system` prompt from `settings.defaultSystemPrompt` or `DEFAULT_SYSTEM_PROMPT`.
 2. `system` info lines: user name, channel type, context name.
 3. Memory block if enabled.
@@ -119,6 +127,7 @@ Conversation assembly order:
 5. Recent message history in the current context.
 
 Constants:
+
 - History limit: `40` messages (local context).
 - Cross-channel default limit: `CROSS_CHANNEL_MESSAGE_LIMIT = 12`.
 - Memory load cap: `MEMORY_LOAD_CAP = 1200` characters.
@@ -126,6 +135,7 @@ Constants:
 - Memory max chars per level: `MEMORY_LEVEL_LIMITS` (level 0..5).
 
 **Compaction:**
+
 - `config.maxTurnsPerContext` (default `60`) triggers compaction when exceeded.
 - Compaction keeps the newest half of messages, deletes older half, and enqueues a `memory_write` job.
 - Memory writer input is capped at `config.memoryWriterMaxMessages` (default `40`).
@@ -135,6 +145,7 @@ Constants:
 **Source of truth:** `apps/worker/src/run-processor.ts`
 
 The run payload for the LLM includes:
+
 - `conversation`: message history (`loadConversation`), with limit `40` for subagents and no limit for coordinator.
 - `memories`: active `memoryItems` for the user (no external retrieval).
 - `transcript`: prior tool calls/results and notes.

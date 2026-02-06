@@ -1,5 +1,13 @@
 import type { FastifyInstance } from 'fastify';
-import { getDb, discordConnections, channels, messages, contexts, agents, runs } from '@clifford/db';
+import {
+  getDb,
+  discordConnections,
+  channels,
+  messages,
+  contexts,
+  agents,
+  runs,
+} from '@clifford/db';
 import { eq, and, sql, desc } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { enqueueRun, enqueueMemoryWrite } from '../../queue.js';

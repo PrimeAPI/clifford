@@ -26,11 +26,7 @@ async function tick() {
   const now = new Date();
 
   // Find triggers that are due
-  const due = await db
-    .select()
-    .from(triggers)
-    .where(lte(triggers.nextFireAt, now))
-    .limit(100);
+  const due = await db.select().from(triggers).where(lte(triggers.nextFireAt, now)).limit(100);
 
   for (const trigger of due) {
     if (!trigger.enabled) continue;
@@ -69,9 +65,7 @@ async function tick() {
 async function autoCloseContexts() {
   const db = getDb();
   const now = new Date();
-  const cutoff = new Date(
-    now.getTime() - config.autoCloseInactivityHours * 60 * 60 * 1000
-  );
+  const cutoff = new Date(now.getTime() - config.autoCloseInactivityHours * 60 * 60 * 1000);
 
   const stale = await db
     .select()

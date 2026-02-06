@@ -40,7 +40,8 @@ export const systemTool: ToolDef = {
     {
       name: 'ping',
       shortDescription: 'Check liveness and timestamp',
-      longDescription: 'Responds with a pong and current timestamp to confirm runtime availability.',
+      longDescription:
+        'Responds with a pong and current timestamp to confirm runtime availability.',
       usageExample: '{"name":"system.ping","args":{}}',
       argsSchema: z.object({}),
       classification: 'READ',

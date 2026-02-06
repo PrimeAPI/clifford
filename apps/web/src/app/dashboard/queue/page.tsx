@@ -13,7 +13,9 @@ export default function QueueOverviewPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold tracking-tight">Queue</h1>
-        <p className="text-muted-foreground">Track system throughput and task health at a glance.</p>
+        <p className="text-muted-foreground">
+          Track system throughput and task health at a glance.
+        </p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">

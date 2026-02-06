@@ -135,11 +135,7 @@ export async function contextRoutes(app: FastifyInstance) {
     const { id } = req.params;
     const db = getDb();
 
-    const [context] = await db
-      .select()
-      .from(contexts)
-      .where(eq(contexts.id, id))
-      .limit(1);
+    const [context] = await db.select().from(contexts).where(eq(contexts.id, id)).limit(1);
 
     if (!context || context.userId !== userId) {
       return reply.status(404).send({ error: 'Context not found' });

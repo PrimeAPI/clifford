@@ -67,9 +67,9 @@ export default function ChannelsPage() {
   const [discordDmAllowedIds, setDiscordDmAllowedIds] = useState<string[]>([]);
   const [discordDmAllowedUsernames, setDiscordDmAllowedUsernames] = useState<string[]>([]);
   const [discordDmKnownUsers, setDiscordDmKnownUsers] = useState<DiscordKnownUser[]>([]);
-  const [discordDmUserMeta, setDiscordDmUserMeta] = useState<Record<string, { label: string; note: string }>>(
-    {}
-  );
+  const [discordDmUserMeta, setDiscordDmUserMeta] = useState<
+    Record<string, { label: string; note: string }>
+  >({});
   const [discordDmSearch, setDiscordDmSearch] = useState('');
   const [discordBotChannel, setDiscordBotChannel] = useState<Channel | null>(null);
   const [loading, setLoading] = useState(true);
@@ -143,7 +143,9 @@ export default function ChannelsPage() {
             )
           : [];
       const allowedMeta =
-        botChannel && botChannel.config?.allowedDiscordUserMeta && typeof botChannel.config.allowedDiscordUserMeta === 'object'
+        botChannel &&
+        botChannel.config?.allowedDiscordUserMeta &&
+        typeof botChannel.config.allowedDiscordUserMeta === 'object'
           ? botChannel.config.allowedDiscordUserMeta
           : {};
 
@@ -359,10 +361,7 @@ export default function ChannelsPage() {
 
   const getInitials = (value?: string) => {
     if (!value) return '?';
-    return value
-      .replace(/#\d+$/, '')
-      .slice(0, 2)
-      .toUpperCase();
+    return value.replace(/#\d+$/, '').slice(0, 2).toUpperCase();
   };
 
   if (loading) {
@@ -378,9 +377,7 @@ export default function ChannelsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Channels</h1>
-          <p className="text-muted-foreground">
-            Configure how you communicate with your agents
-          </p>
+          <p className="text-muted-foreground">Configure how you communicate with your agents</p>
         </div>
         <Button onClick={() => setShowAddChannel(true)}>
           <Plus className="mr-2 h-4 w-4" />
@@ -565,88 +562,90 @@ export default function ChannelsPage() {
                 </div>
               ) : (
                 <div className="space-y-4">
-              {messages.map((message) => (
-                (() => {
-                  let metadata: {
-                    discordUserId?: string;
-                    discordUsername?: string;
-                    discordAvatar?: string | null;
-                  } | null = null;
+                  {messages.map((message) =>
+                    (() => {
+                      let metadata: {
+                        discordUserId?: string;
+                        discordUsername?: string;
+                        discordAvatar?: string | null;
+                      } | null = null;
 
-                  if (message.metadata) {
-                    try {
-                      metadata = JSON.parse(message.metadata);
-                    } catch {
-                      metadata = null;
-                    }
-                  }
+                      if (message.metadata) {
+                        try {
+                          metadata = JSON.parse(message.metadata);
+                        } catch {
+                          metadata = null;
+                        }
+                      }
 
-                  const showAvatar =
-                    selectedChannel.type === 'discord' && message.direction === 'inbound';
-                  const avatarUrl = showAvatar ? getDiscordAvatar(metadata || undefined) : null;
-                  const avatarLabel = metadata?.discordUsername || metadata?.discordUserId;
-                  const metaLabel =
-                    metadata?.discordUserId && discordDmUserMeta[metadata.discordUserId]?.label
-                      ? discordDmUserMeta[metadata.discordUserId]?.label
-                      : null;
-                  const metaNote =
-                    metadata?.discordUserId && discordDmUserMeta[metadata.discordUserId]?.note
-                      ? discordDmUserMeta[metadata.discordUserId]?.note
-                      : null;
+                      const showAvatar =
+                        selectedChannel.type === 'discord' && message.direction === 'inbound';
+                      const avatarUrl = showAvatar ? getDiscordAvatar(metadata || undefined) : null;
+                      const avatarLabel = metadata?.discordUsername || metadata?.discordUserId;
+                      const metaLabel =
+                        metadata?.discordUserId && discordDmUserMeta[metadata.discordUserId]?.label
+                          ? discordDmUserMeta[metadata.discordUserId]?.label
+                          : null;
+                      const metaNote =
+                        metadata?.discordUserId && discordDmUserMeta[metadata.discordUserId]?.note
+                          ? discordDmUserMeta[metadata.discordUserId]?.note
+                          : null;
 
-                  return (
-                    <div
-                      key={message.id}
-                      className={`flex items-end gap-2 ${
-                        message.direction === 'outbound' ? 'justify-end' : 'justify-start'
-                      }`}
-                    >
-                      {showAvatar && (
-                        <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-muted text-xs text-muted-foreground">
-                          {avatarUrl ? (
-                            <Image
-                              src={avatarUrl}
-                              alt={avatarLabel || 'Discord avatar'}
-                              width={32}
-                              height={32}
-                            />
-                          ) : (
-                            getInitials(avatarLabel || '')
-                          )}
-                        </div>
-                      )}
-                      <div
-                        className={`max-w-[70%] rounded-lg px-4 py-2 ${
-                          message.direction === 'outbound'
-                            ? 'bg-primary text-primary-foreground'
-                            : 'bg-muted'
-                        }`}
-                      >
-                        <p className="whitespace-pre-wrap break-words">{message.content}</p>
-                        {metadata?.discordUsername && (
-                          <p className="mt-1 text-xs text-muted-foreground">{metadata.discordUsername}</p>
-                        )}
-                        {(metaLabel || metaNote) && (
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            {metaLabel && <span className="font-medium">{metaLabel}</span>}
-                            {metaLabel && metaNote && <span> · </span>}
-                            {metaNote && <span>{metaNote}</span>}
-                          </div>
-                        )}
-                        <p
-                          className={`mt-1 text-xs ${
-                            message.direction === 'outbound'
-                              ? 'text-primary-foreground/70'
-                              : 'text-muted-foreground'
+                      return (
+                        <div
+                          key={message.id}
+                          className={`flex items-end gap-2 ${
+                            message.direction === 'outbound' ? 'justify-end' : 'justify-start'
                           }`}
                         >
-                          {new Date(message.createdAt).toLocaleTimeString()}
-                        </p>
-                      </div>
-                    </div>
-                  );
-                })()
-              ))}
+                          {showAvatar && (
+                            <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-muted text-xs text-muted-foreground">
+                              {avatarUrl ? (
+                                <Image
+                                  src={avatarUrl}
+                                  alt={avatarLabel || 'Discord avatar'}
+                                  width={32}
+                                  height={32}
+                                />
+                              ) : (
+                                getInitials(avatarLabel || '')
+                              )}
+                            </div>
+                          )}
+                          <div
+                            className={`max-w-[70%] rounded-lg px-4 py-2 ${
+                              message.direction === 'outbound'
+                                ? 'bg-primary text-primary-foreground'
+                                : 'bg-muted'
+                            }`}
+                          >
+                            <p className="whitespace-pre-wrap break-words">{message.content}</p>
+                            {metadata?.discordUsername && (
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {metadata.discordUsername}
+                              </p>
+                            )}
+                            {(metaLabel || metaNote) && (
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                {metaLabel && <span className="font-medium">{metaLabel}</span>}
+                                {metaLabel && metaNote && <span> · </span>}
+                                {metaNote && <span>{metaNote}</span>}
+                              </div>
+                            )}
+                            <p
+                              className={`mt-1 text-xs ${
+                                message.direction === 'outbound'
+                                  ? 'text-primary-foreground/70'
+                                  : 'text-muted-foreground'
+                              }`}
+                            >
+                              {new Date(message.createdAt).toLocaleTimeString()}
+                            </p>
+                          </div>
+                        </div>
+                      );
+                    })()
+                  )}
                   <div ref={messagesEndRef} />
                 </div>
               )}
@@ -702,12 +701,7 @@ export default function ChannelsPage() {
                         <div className="flex items-center gap-3">
                           <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-muted text-xs text-muted-foreground">
                             {avatarUrl ? (
-                              <Image
-                                src={avatarUrl}
-                                alt={user.username}
-                                width={32}
-                                height={32}
-                              />
+                              <Image src={avatarUrl} alt={user.username} width={32} height={32} />
                             ) : (
                               getInitials(user.username)
                             )}
@@ -764,7 +758,8 @@ export default function ChannelsPage() {
                   <Button onClick={handleAddDiscordDmUsername}>Add</Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  You can include the discriminator (username#1234) or just the username. If it matches, the user ID will be auto-added on first DM.
+                  You can include the discriminator (username#1234) or just the username. If it
+                  matches, the user ID will be auto-added on first DM.
                 </p>
               </div>
 
@@ -774,10 +769,7 @@ export default function ChannelsPage() {
                     const knownUser = discordDmKnownUsers.find((user) => user.id === id);
                     const meta = discordDmUserMeta[id] || { label: '', note: '' };
                     return (
-                      <div
-                        key={id}
-                        className="space-y-2 rounded-lg border border-border px-3 py-2"
-                      >
+                      <div key={id} className="space-y-2 rounded-lg border border-border px-3 py-2">
                         <div className="flex items-center justify-between">
                           <div>
                             <p className="text-sm">{knownUser?.username || id}</p>
@@ -874,11 +866,7 @@ export default function ChannelsPage() {
               >
                 Discord Account (OAuth or Manual ID)
               </Button>
-              <Button
-                variant="ghost"
-                className="w-full"
-                onClick={() => setShowAddChannel(false)}
-              >
+              <Button variant="ghost" className="w-full" onClick={() => setShowAddChannel(false)}>
                 Cancel
               </Button>
             </CardContent>
@@ -919,7 +907,11 @@ export default function ChannelsPage() {
               </div>
 
               <div className="flex gap-2">
-                <Button variant="outline" onClick={() => setShowAddDiscord(false)} className="flex-1">
+                <Button
+                  variant="outline"
+                  onClick={() => setShowAddDiscord(false)}
+                  className="flex-1"
+                >
                   Cancel
                 </Button>
                 <Button onClick={handleManualConnect} className="flex-1">

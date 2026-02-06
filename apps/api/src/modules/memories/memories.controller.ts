@@ -150,10 +150,7 @@ export async function memoryRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'Memory not found' });
     }
 
-    await db
-      .update(memoryItems)
-      .set({ archived: true })
-      .where(eq(memoryItems.id, memoryId));
+    await db.update(memoryItems).set({ archived: true }).where(eq(memoryItems.id, memoryId));
 
     return { success: true };
   });

@@ -75,9 +75,9 @@ export async function callOpenAIWithFallback(
     const status = error?.status;
     const shouldFallback = Boolean(
       fallbackModel &&
-        fallbackModel.trim() &&
-        model !== fallbackModel &&
-        (status === undefined || status >= 429)
+      fallbackModel.trim() &&
+      model !== fallbackModel &&
+      (status === undefined || status >= 429)
     );
 
     if (!shouldFallback) {

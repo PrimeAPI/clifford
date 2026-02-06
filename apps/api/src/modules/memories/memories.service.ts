@@ -58,7 +58,7 @@ export async function ensureSettings(db: ReturnType<typeof getDb>, userId: strin
   return created;
 }
 
-export function selectActiveMemories(items: typeof memoryItems.$inferSelect[]) {
+export function selectActiveMemories(items: (typeof memoryItems.$inferSelect)[]) {
   const byLevel = new Map<number, typeof items>();
   for (const item of items) {
     const list = byLevel.get(item.level) ?? [];
@@ -151,6 +151,14 @@ export async function enforceCaps(db: ReturnType<typeof getDb>, userId: string) 
     await db
       .update(memoryItems)
       .set({ archived: true })
-      .where(and(eq(memoryItems.userId, userId), inArray(memoryItems.id, toArchive.map((i) => i.id))));
+      .where(
+        and(
+          eq(memoryItems.userId, userId),
+          inArray(
+            memoryItems.id,
+            toArchive.map((i) => i.id)
+          )
+        )
+      );
   }
 }

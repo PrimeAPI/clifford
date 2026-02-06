@@ -6,7 +6,10 @@ const weatherGetArgs = z
     location: z.string().optional(),
     region: z.string().optional(),
     days: z.number().int().min(1).max(14).optional(),
-    startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    startDate: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional(),
     timezone: z.string().optional(),
     units: z.enum(['metric', 'imperial']).optional(),
     includeHourly: z.boolean().optional(),
@@ -33,7 +36,13 @@ async function geocode(region: string): Promise<WeatherLocation | null> {
     throw new Error(`Geocoding failed: ${response.status}`);
   }
   const data = (await response.json()) as {
-    results?: Array<{ name: string; latitude: number; longitude: number; country?: string; timezone?: string }>;
+    results?: Array<{
+      name: string;
+      latitude: number;
+      longitude: number;
+      country?: string;
+      timezone?: string;
+    }>;
   };
   const result = data.results?.[0];
   if (!result) return null;
@@ -145,8 +154,7 @@ async function fetchWeather({
 export const weatherTool: ToolDef = {
   name: 'weather',
   shortDescription: 'Weather lookup with daily[] forecasts (days controls horizon)',
-  longDescription:
-    'Fetches current conditions and daily[] forecasts using Open-Meteo.',
+  longDescription: 'Fetches current conditions and daily[] forecasts using Open-Meteo.',
   config: {
     fields: [
       {
@@ -263,7 +271,8 @@ export const weatherTool: ToolDef = {
 
         const returnedStart = daily[0]?.date ?? startDate;
         const returnedEnd = daily[daily.length - 1]?.date ?? endDate;
-        const isPartial = returnedStart !== startDate || returnedEnd !== endDate || daily.length < days;
+        const isPartial =
+          returnedStart !== startDate || returnedEnd !== endDate || daily.length < days;
         return {
           location: {
             name: geocodedLocation.name,

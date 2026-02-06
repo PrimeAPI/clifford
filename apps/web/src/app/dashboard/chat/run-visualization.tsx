@@ -36,9 +36,22 @@ type RunDetails = {
 
 type TaskDialogEntry =
   | { id: string; seq: number; kind: 'decision'; content: string; importance: string }
-  | { id: string; seq: number; kind: 'note'; category: 'requirements' | 'plan' | 'artifact' | 'validation'; content: string }
+  | {
+      id: string;
+      seq: number;
+      kind: 'note';
+      category: 'requirements' | 'plan' | 'artifact' | 'validation';
+      content: string;
+    }
   | { id: string; seq: number; kind: 'system_note'; content: string }
-  | { id: string; seq: number; kind: 'budget_decision'; action: string; reason?: string | null; maxIterations?: number | null }
+  | {
+      id: string;
+      seq: number;
+      kind: 'budget_decision';
+      action: string;
+      reason?: string | null;
+      maxIterations?: number | null;
+    }
   | {
       id: string;
       seq: number;
@@ -47,7 +60,14 @@ type TaskDialogEntry =
       details: Array<{ key: string; value: string }>;
       raw?: unknown;
     }
-  | { id: string; seq: number; kind: 'tool_result'; label: string; toolName: string; result?: unknown }
+  | {
+      id: string;
+      seq: number;
+      kind: 'tool_result';
+      label: string;
+      toolName: string;
+      result?: unknown;
+    }
   | {
       id: string;
       seq: number;
@@ -225,25 +245,34 @@ function TaskDialog({
             detail: payload.feedback ?? 'Validation requested changes.',
           });
         }
-          if (payload?.event === 'sleep') {
-            items.push({
-              id: step.id,
-              seq: step.seq,
-              kind: 'sleep',
-              label: 'Sleep',
-              detail: payload?.reason ?? 'Waiting for wake trigger',
-            });
-          }
-      if (payload?.event && !['spawn_subagents', 'sleep', 'budget_decision', 'system_note', 'validation_feedback'].includes(payload.event)) {
-        items.push({
-          id: step.id,
-          seq: step.seq,
-          kind: 'event',
-          label: `Event · ${payload.event}`,
-          details: formatEventDetails(payload),
-          raw: payload,
-        });
-      }
+        if (payload?.event === 'sleep') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'sleep',
+            label: 'Sleep',
+            detail: payload?.reason ?? 'Waiting for wake trigger',
+          });
+        }
+        if (
+          payload?.event &&
+          ![
+            'spawn_subagents',
+            'sleep',
+            'budget_decision',
+            'system_note',
+            'validation_feedback',
+          ].includes(payload.event)
+        ) {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'event',
+            label: `Event · ${payload.event}`,
+            details: formatEventDetails(payload),
+            raw: payload,
+          });
+        }
       }
 
       if (step.type === 'assistant_message') {
@@ -418,7 +447,9 @@ function TaskDialog({
         <div>Profile: {details.run.profile ?? details.run.kind ?? 'coordinator'}</div>
       </div>
       <div className="rounded border border-border p-3 text-xs text-muted-foreground">
-        <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Run Metadata</div>
+        <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+          Run Metadata
+        </div>
         <div className="mt-2 grid grid-cols-1 gap-1 md:grid-cols-2">
           <div>Run ID: {details.run.id}</div>
           <div>Agent ID: {details.run.agentId}</div>
@@ -427,7 +458,10 @@ function TaskDialog({
           <div>Updated: {details.run.updatedAt ?? 'unknown'}</div>
           <div>Wake Reason: {details.run.wakeReason ?? 'none'}</div>
           <div>Wake At: {details.run.wakeAt ?? 'none'}</div>
-          <div>Tools Allowed: {Array.isArray(details.run.allowedTools) ? details.run.allowedTools.length : 'all'}</div>
+          <div>
+            Tools Allowed:{' '}
+            {Array.isArray(details.run.allowedTools) ? details.run.allowedTools.length : 'all'}
+          </div>
           <div>Run Budget: {runBudget?.maxIterations ?? 'not set'}</div>
           <div>Budget Reason: {runBudget?.reason ?? 'n/a'}</div>
           <div>Finish Reason: {finishReason ?? 'n/a'}</div>
@@ -444,200 +478,211 @@ function TaskDialog({
           entries
             .filter((entry) => showEvents || entry.kind !== 'event')
             .map((entry, index) => {
-            if (entry.kind === 'finish' && details.run.outputText) {
-              const output = details.run.outputText;
-              const preview = output.length > 240 ? `${output.slice(0, 240)}…` : output;
-              return (
-                <div key={`${entry.id}-output`} className="rounded border border-border p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Output</div>
-                    {output.length > 240 ? (
-                      <Button variant="ghost" size="sm" onClick={() => setShowFullOutput((v) => !v)}>
-                        {showFullOutput ? 'Collapse' : 'Expand'}
-                      </Button>
-                    ) : null}
-                  </div>
-                  <div className="mt-1 whitespace-pre-wrap">
-                    {showFullOutput ? output : preview}
-                  </div>
-                </div>
-              );
-            }
-            if (entry.kind === 'decision') {
-              return (
-                <div key={entry.id} className="rounded border border-border bg-accent/30 p-3">
-                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    Decision · {entry.importance}
-                  </div>
-                  <div className="mt-1 whitespace-pre-wrap">{entry.content}</div>
-                </div>
-              );
-            }
-            if (entry.kind === 'note') {
-              return (
-                <div key={entry.id} className="rounded border border-border bg-muted/40 p-3">
-                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    {entry.category}
-                  </div>
-                  <div className="mt-1 whitespace-pre-wrap">{entry.content}</div>
-                </div>
-              );
-            }
-            if (entry.kind === 'system_note') {
-              return (
-                <div key={entry.id} className="rounded border border-border bg-amber-50/60 p-3 text-amber-900">
-                  <div className="text-[11px] uppercase tracking-wide text-amber-700">System note</div>
-                  <div className="mt-1 whitespace-pre-wrap">{entry.content}</div>
-                </div>
-              );
-            }
-            if (entry.kind === 'budget_decision') {
-              return (
-                <div key={entry.id} className="rounded border border-border bg-accent/20 p-3">
-                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    Budget decision · {entry.action}
-                  </div>
-                  <div className="mt-1 whitespace-pre-wrap">
-                    {entry.reason || 'No reason provided.'}
-                  </div>
-                  {typeof entry.maxIterations === 'number' ? (
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      New max iterations: {entry.maxIterations}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            }
-            if (entry.kind === 'tool') {
-              return (
-                <div key={entry.id} className="rounded border border-border p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="font-medium">{entry.label}</div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() =>
-                        onOpenTool({
-                          name: entry.toolName,
-                          args: entry.args,
-                          result: entry.result,
-                        })
-                      }
-                    >
-                      View
-                    </Button>
-                  </div>
-                </div>
-              );
-            }
-            if (entry.kind === 'tool_result') {
-              return (
-                <div key={entry.id} className="rounded border border-border p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="font-medium">{entry.label}</div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() =>
-                        onOpenTool({
-                          name: entry.toolName,
-                          result: entry.result,
-                        })
-                      }
-                    >
-                      View
-                    </Button>
-                  </div>
-                </div>
-              );
-            }
-            if (entry.kind === 'spawn') {
-              return (
-                <div key={entry.id} className="rounded border border-border p-3">
-                  <div className="font-medium">{entry.label}</div>
-                  <div className="mt-2 space-y-2">
-                    {entry.subagents.map((sub) => (
-                      <div
-                        key={sub.runId}
-                        className="flex items-center justify-between rounded border border-border px-2 py-1"
-                      >
-                        <div className="text-xs">
-                          {sub.profile ?? 'subagent'} · {sub.task} · {sub.status ?? 'unknown'}
-                        </div>
+              if (entry.kind === 'finish' && details.run.outputText) {
+                const output = details.run.outputText;
+                const preview = output.length > 240 ? `${output.slice(0, 240)}…` : output;
+                return (
+                  <div key={`${entry.id}-output`} className="rounded border border-border p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                        Output
+                      </div>
+                      {output.length > 240 ? (
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => onOpenTask(sub.runId)}
+                          onClick={() => setShowFullOutput((v) => !v)}
                         >
-                          Open
+                          {showFullOutput ? 'Collapse' : 'Expand'}
                         </Button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            }
-            if (entry.kind === 'message') {
-              return (
-                <div key={entry.id} className="rounded border border-border p-3">
-                  <div className="font-medium">{entry.label}</div>
-                  <div className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">
-                    {entry.detail}
-                  </div>
-                </div>
-              );
-            }
-            if (entry.kind === 'event') {
-              const isExpanded = expandedEvents.has(entry.id);
-              return (
-                <div key={entry.id} className="rounded border border-border bg-muted/20 p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="font-medium">{entry.label}</div>
-                    <Button variant="ghost" size="sm" onClick={() => toggleEventExpanded(entry.id)}>
-                      {isExpanded ? 'Hide JSON' : 'Show JSON'}
-                    </Button>
-                  </div>
-                  <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-                    {entry.details.length === 0 ? (
-                      <div>No details.</div>
-                    ) : (
-                      entry.details.map((detail) => (
-                        <div key={`${entry.id}-${detail.key}`}>
-                          {detail.key}: {detail.value}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                  {isExpanded ? (
-                    <pre className="mt-2 whitespace-pre-wrap rounded border border-border bg-background p-2 text-[11px] text-muted-foreground">
-                      {JSON.stringify(entry.raw ?? {}, null, 2)}
-                    </pre>
-                  ) : null}
-                </div>
-              );
-            }
-            if (entry.kind === 'sleep') {
-              return (
-                <div key={entry.id} className="rounded border border-border p-3">
-                  <div className="font-medium">{entry.label}</div>
-                  <div className="mt-1 text-xs text-muted-foreground">{entry.detail}</div>
-                </div>
-              );
-            }
-            if (entry.kind === 'finish') {
-              return (
-                <div key={entry.id} className="rounded border border-border p-3">
-                  <div className="font-medium">{entry.label}</div>
-                  {entry.reason ? (
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      Reason: {entry.reason}
+                      ) : null}
                     </div>
-                  ) : null}
-                </div>
-              );
-            }
-            return null;
-          })
+                    <div className="mt-1 whitespace-pre-wrap">
+                      {showFullOutput ? output : preview}
+                    </div>
+                  </div>
+                );
+              }
+              if (entry.kind === 'decision') {
+                return (
+                  <div key={entry.id} className="rounded border border-border bg-accent/30 p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Decision · {entry.importance}
+                    </div>
+                    <div className="mt-1 whitespace-pre-wrap">{entry.content}</div>
+                  </div>
+                );
+              }
+              if (entry.kind === 'note') {
+                return (
+                  <div key={entry.id} className="rounded border border-border bg-muted/40 p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      {entry.category}
+                    </div>
+                    <div className="mt-1 whitespace-pre-wrap">{entry.content}</div>
+                  </div>
+                );
+              }
+              if (entry.kind === 'system_note') {
+                return (
+                  <div
+                    key={entry.id}
+                    className="rounded border border-border bg-amber-50/60 p-3 text-amber-900"
+                  >
+                    <div className="text-[11px] uppercase tracking-wide text-amber-700">
+                      System note
+                    </div>
+                    <div className="mt-1 whitespace-pre-wrap">{entry.content}</div>
+                  </div>
+                );
+              }
+              if (entry.kind === 'budget_decision') {
+                return (
+                  <div key={entry.id} className="rounded border border-border bg-accent/20 p-3">
+                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Budget decision · {entry.action}
+                    </div>
+                    <div className="mt-1 whitespace-pre-wrap">
+                      {entry.reason || 'No reason provided.'}
+                    </div>
+                    {typeof entry.maxIterations === 'number' ? (
+                      <div className="mt-2 text-xs text-muted-foreground">
+                        New max iterations: {entry.maxIterations}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }
+              if (entry.kind === 'tool') {
+                return (
+                  <div key={entry.id} className="rounded border border-border p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="font-medium">{entry.label}</div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          onOpenTool({
+                            name: entry.toolName,
+                            args: entry.args,
+                            result: entry.result,
+                          })
+                        }
+                      >
+                        View
+                      </Button>
+                    </div>
+                  </div>
+                );
+              }
+              if (entry.kind === 'tool_result') {
+                return (
+                  <div key={entry.id} className="rounded border border-border p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="font-medium">{entry.label}</div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() =>
+                          onOpenTool({
+                            name: entry.toolName,
+                            result: entry.result,
+                          })
+                        }
+                      >
+                        View
+                      </Button>
+                    </div>
+                  </div>
+                );
+              }
+              if (entry.kind === 'spawn') {
+                return (
+                  <div key={entry.id} className="rounded border border-border p-3">
+                    <div className="font-medium">{entry.label}</div>
+                    <div className="mt-2 space-y-2">
+                      {entry.subagents.map((sub) => (
+                        <div
+                          key={sub.runId}
+                          className="flex items-center justify-between rounded border border-border px-2 py-1"
+                        >
+                          <div className="text-xs">
+                            {sub.profile ?? 'subagent'} · {sub.task} · {sub.status ?? 'unknown'}
+                          </div>
+                          <Button variant="ghost" size="sm" onClick={() => onOpenTask(sub.runId)}>
+                            Open
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              }
+              if (entry.kind === 'message') {
+                return (
+                  <div key={entry.id} className="rounded border border-border p-3">
+                    <div className="font-medium">{entry.label}</div>
+                    <div className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">
+                      {entry.detail}
+                    </div>
+                  </div>
+                );
+              }
+              if (entry.kind === 'event') {
+                const isExpanded = expandedEvents.has(entry.id);
+                return (
+                  <div key={entry.id} className="rounded border border-border bg-muted/20 p-3">
+                    <div className="flex items-center justify-between">
+                      <div className="font-medium">{entry.label}</div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => toggleEventExpanded(entry.id)}
+                      >
+                        {isExpanded ? 'Hide JSON' : 'Show JSON'}
+                      </Button>
+                    </div>
+                    <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+                      {entry.details.length === 0 ? (
+                        <div>No details.</div>
+                      ) : (
+                        entry.details.map((detail) => (
+                          <div key={`${entry.id}-${detail.key}`}>
+                            {detail.key}: {detail.value}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    {isExpanded ? (
+                      <pre className="mt-2 whitespace-pre-wrap rounded border border-border bg-background p-2 text-[11px] text-muted-foreground">
+                        {JSON.stringify(entry.raw ?? {}, null, 2)}
+                      </pre>
+                    ) : null}
+                  </div>
+                );
+              }
+              if (entry.kind === 'sleep') {
+                return (
+                  <div key={entry.id} className="rounded border border-border p-3">
+                    <div className="font-medium">{entry.label}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">{entry.detail}</div>
+                  </div>
+                );
+              }
+              if (entry.kind === 'finish') {
+                return (
+                  <div key={entry.id} className="rounded border border-border p-3">
+                    <div className="font-medium">{entry.label}</div>
+                    {entry.reason ? (
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        Reason: {entry.reason}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }
+              return null;
+            })
         )}
       </div>
     </div>
@@ -657,7 +702,10 @@ function useRunDetails(runId: string) {
     }
     try {
       const res = await fetch(`/api/runs/${runId}`, {
-        headers: { 'X-User-Id': DEMO_USER_ID, 'X-Tenant-Id': '00000000-0000-0000-0000-000000000000' },
+        headers: {
+          'X-User-Id': DEMO_USER_ID,
+          'X-Tenant-Id': '00000000-0000-0000-0000-000000000000',
+        },
       });
       const data = (await res.json()) as RunDetails;
       const detailsSignature = [
@@ -674,7 +722,10 @@ function useRunDetails(runId: string) {
       }
 
       const childRes = await fetch(`/api/runs/${runId}/children`, {
-        headers: { 'X-User-Id': DEMO_USER_ID, 'X-Tenant-Id': '00000000-0000-0000-0000-000000000000' },
+        headers: {
+          'X-User-Id': DEMO_USER_ID,
+          'X-Tenant-Id': '00000000-0000-0000-0000-000000000000',
+        },
       });
       const childData = (await childRes.json()) as { children: RunSummary[] };
       const nextChildren = childData.children || [];
@@ -822,9 +873,7 @@ export function RunVisualization({ runId }: { runId: string }) {
       );
     }
 
-    return (
-      <pre className="whitespace-pre-wrap text-xs">{JSON.stringify(content, null, 2)}</pre>
-    );
+    return <pre className="whitespace-pre-wrap text-xs">{JSON.stringify(content, null, 2)}</pre>;
   };
 
   return (

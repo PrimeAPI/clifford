@@ -15,7 +15,9 @@ Each commit must follow this format:
 ```
 
 ### Types
+
 Use one of the following:
+
 - `build`
 - `chore`
 - `ci`
@@ -31,26 +33,33 @@ Use one of the following:
 Add more types if they make sense for the change.
 
 ### Scope (Required)
+
 The scope is **always required** and should be the component name (because this is a monorepo).
 
 Examples:
+
 - `feat(api): add contexts close endpoint`
 - `fix(worker): handle memory-write errors`
 - `docs(web): update memory UI guide`
 
 If the change touches **two components**, list both, comma-separated:
+
 - `refactor(api,worker): unify memory job payload`
 
 If the change touches **three or more components**, omit the scope to signal a global change:
+
 - `chore: repo-wide formatting`
 
 ### Description
+
 Keep it short and clear. Use the body for extra detail if needed (links are welcome).
 
 ### Breaking Changes
+
 Use `!` after the scope and describe the break in the body.
 
 Example:
+
 ```
 feat(db)!: remove auth schema
 
@@ -58,11 +67,13 @@ BREAKING: auth schema removed; run migrations before deploy.
 ```
 
 ### Issue/PR Linking (Preferred)
+
 Always link the issue in the commit message footer with `(#123)` when available.
 For squash merges, always include the PR number as `(#123)`.
 If no issue/PR number exists, the footer can be omitted.
 
 Example:
+
 ```
 fix(worker): handle missing memory ops
 

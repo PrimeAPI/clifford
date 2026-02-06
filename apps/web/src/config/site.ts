@@ -27,14 +27,12 @@ export const FEATURES: Feature[] = [
   },
   {
     title: 'Plugin System',
-    description:
-      'Extend capabilities with custom tools and plugins. Build once, reuse everywhere.',
+    description: 'Extend capabilities with custom tools and plugins. Build once, reuse everywhere.',
     icon: Rocket,
   },
   {
     title: 'Multi-Tenant',
-    description:
-      'Production-ready architecture with isolated workspaces and granular permissions.',
+    description: 'Production-ready architecture with isolated workspaces and granular permissions.',
     icon: Bot,
   },
 ];

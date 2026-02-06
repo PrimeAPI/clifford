@@ -3,7 +3,10 @@ import { eq, inArray } from 'drizzle-orm';
 
 export const JOB_LIMIT = 25;
 
-export function serializeJob(job: any, extra?: { detail?: string; meta?: Record<string, unknown> }) {
+export function serializeJob(
+  job: any,
+  extra?: { detail?: string; meta?: Record<string, unknown> }
+) {
   return {
     id: job.id,
     name: job.name,

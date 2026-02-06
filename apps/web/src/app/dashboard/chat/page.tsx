@@ -328,9 +328,7 @@ export default function ChatPage() {
               <div>
                 <MessageSquare className="mx-auto mb-4 h-12 w-12 text-muted-foreground" />
                 <p className="text-muted-foreground">No messages yet</p>
-                <p className="text-sm text-muted-foreground">
-                  Send a message to get started
-                </p>
+                <p className="text-sm text-muted-foreground">Send a message to get started</p>
               </div>
             </div>
           ) : (
@@ -358,9 +356,7 @@ export default function ChatPage() {
                       <p className="text-xs font-semibold uppercase tracking-wide opacity-70">
                         {message.direction === 'inbound' ? 'You' : 'Clifford'}
                       </p>
-                      <div className="mt-1 break-words">
-                        {renderMarkdown(message.content)}
-                      </div>
+                      <div className="mt-1 break-words">{renderMarkdown(message.content)}</div>
                       {message.direction !== 'inbound' && extractRunId(message.metadata) ? (
                         <RunVisualization runId={extractRunId(message.metadata)} />
                       ) : null}
@@ -402,7 +398,9 @@ export default function ChatPage() {
                         </span>
                       </p>
                       {messages[messages.length - 1] ? (
-                        <RunVisualization runId={extractRunId(messages[messages.length - 1]?.metadata)} />
+                        <RunVisualization
+                          runId={extractRunId(messages[messages.length - 1]?.metadata)}
+                        />
                       ) : null}
                     </div>
                   </div>

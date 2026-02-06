@@ -46,10 +46,7 @@ export async function listRunsForTenant(
   return { total, runs: recentRuns };
 }
 
-export async function ensureRunChannelAccess(
-  db: ReturnType<typeof getDb>,
-  channelId: string
-) {
+export async function ensureRunChannelAccess(db: ReturnType<typeof getDb>, channelId: string) {
   const [channel] = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1);
   return channel ?? null;
 }

@@ -31,8 +31,8 @@ export async function toolRoutes(app: FastifyInstance) {
         })),
         configFields: tool.config?.fields ?? [],
         enabled: setting?.enabled ?? true,
-        pinned: setting?.pinned ?? (hasUserSettings ? false : tool.pinned ?? false),
-        important: setting?.important ?? (hasUserSettings ? false : tool.important ?? false),
+        pinned: setting?.pinned ?? (hasUserSettings ? false : (tool.pinned ?? false)),
+        important: setting?.important ?? (hasUserSettings ? false : (tool.important ?? false)),
         config: setting?.config ?? {},
       };
     });
@@ -78,7 +78,7 @@ export async function toolRoutes(app: FastifyInstance) {
     }
 
     const nextPinned = body.pinned ?? false;
-    const nextImportant = nextPinned ? false : body.important ?? false;
+    const nextImportant = nextPinned ? false : (body.important ?? false);
 
     const updateSet: Record<string, unknown> = { updatedAt: new Date() };
     if (body.enabled !== undefined) updateSet.enabled = body.enabled;

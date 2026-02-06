@@ -101,8 +101,8 @@ client.on('ready', () => {
   logger.info({ user: client.user?.tag }, 'Discord bot connected');
   startDeliveryWorker();
 
-  client.application
-    ?.commands.set(contextCommands)
+  client.application?.commands
+    .set(contextCommands)
     .then(() => {
       logger.info('Discord slash commands registered');
     })
@@ -121,7 +121,9 @@ client.on(Events.MessageCreate, async (message) => {
 
   if (!isDM && !isMentioned) return;
 
-  const content = isDM ? message.content : message.content.replace(`<@${client.user?.id}>`, '').trim();
+  const content = isDM
+    ? message.content
+    : message.content.replace(`<@${client.user?.id}>`, '').trim();
 
   await message.channel.sendTyping();
 

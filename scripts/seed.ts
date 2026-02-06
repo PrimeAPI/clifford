@@ -2,7 +2,8 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
 async function seed() {
-  const connectionString = process.env.DATABASE_URL || 'postgresql://clifford:clifford@localhost:5432/clifford';
+  const connectionString =
+    process.env.DATABASE_URL || 'postgresql://clifford:clifford@localhost:5432/clifford';
   const client = postgres(connectionString);
   const db = drizzle(client);
 

@@ -65,7 +65,9 @@ export async function messageRoutes(app: FastifyInstance) {
             and(
               eq(messages.userId, userId),
               eq(messages.channelId, channelId),
-              scopedContextId ? eq(messages.contextId, scopedContextId) : eq(messages.contextId, null)
+              scopedContextId
+                ? eq(messages.contextId, scopedContextId)
+                : eq(messages.contextId, null)
             )
           )
           .orderBy(desc(messages.createdAt))

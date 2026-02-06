@@ -1,6 +1,14 @@
 import type { Job } from 'bullmq';
 import type { MessageJob, Logger } from '@clifford/sdk';
-import { getDb, messages, channels, userSettings, users, contexts, memoryItems } from '@clifford/db';
+import {
+  getDb,
+  messages,
+  channels,
+  userSettings,
+  users,
+  contexts,
+  memoryItems,
+} from '@clifford/db';
 import { eq, and, desc, ne, asc, inArray, sql } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { config } from './config.js';
@@ -8,8 +16,7 @@ import { enqueueDelivery, enqueueMemoryWrite } from './queues.js';
 import { decryptSecret } from '@clifford/core';
 import { callOpenAIWithFallback, type OpenAIMessage } from './openai-client.js';
 
-const DEFAULT_SYSTEM_PROMPT =
-  'You are Clifford, a very skilled and highly complex AI-Assistent!';
+const DEFAULT_SYSTEM_PROMPT = 'You are Clifford, a very skilled and highly complex AI-Assistent!';
 const CROSS_CHANNEL_MESSAGE_LIMIT = 12;
 
 interface DiscordMetadata {
@@ -108,8 +115,7 @@ export async function processMessage(job: Job<MessageJob>, logger: Logger) {
 
     const crossChannelBlocks: OpenAIMessage[] = [];
     const crossChannelEnabled = settings.crossChannelContextEnabled ?? true;
-    const crossChannelLimit =
-      settings.crossChannelContextLimit ?? CROSS_CHANNEL_MESSAGE_LIMIT;
+    const crossChannelLimit = settings.crossChannelContextLimit ?? CROSS_CHANNEL_MESSAGE_LIMIT;
 
     if (crossChannelEnabled) {
       const otherChannels = await db
@@ -133,7 +139,9 @@ export async function processMessage(job: Job<MessageJob>, logger: Logger) {
 
         const ordered = otherMessages.reverse();
         const transcript = ordered
-          .map((entry) => `${entry.direction === 'inbound' ? 'User' : 'Clifford'}: ${entry.content}`)
+          .map(
+            (entry) => `${entry.direction === 'inbound' ? 'User' : 'Clifford'}: ${entry.content}`
+          )
           .join('\n');
 
         crossChannelBlocks.push({

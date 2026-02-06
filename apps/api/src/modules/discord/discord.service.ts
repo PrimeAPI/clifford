@@ -32,10 +32,7 @@ export async function resolveDiscordChannel(
     .select()
     .from(channels)
     .where(
-      and(
-        eq(channels.type, 'discord'),
-        sql`COALESCE(${channels.config} ->> 'mode', '') = 'bot_dm'`
-      )
+      and(eq(channels.type, 'discord'), sql`COALESCE(${channels.config} ->> 'mode', '') = 'bot_dm'`)
     );
 
   for (const channel of botChannels) {

@@ -13,7 +13,10 @@ const renderJobList = (title: string, jobs: QueueJob[]) => (
     {jobs.length ? (
       <div className="space-y-2 rounded-md border border-border p-3">
         {jobs.map((job) => (
-          <div key={job.id} className="space-y-1 border-b border-border pb-2 last:border-0 last:pb-0">
+          <div
+            key={job.id}
+            className="space-y-1 border-b border-border pb-2 last:border-0 last:pb-0"
+          >
             <p className="text-sm font-medium">{job.id}</p>
             <p className="text-xs text-muted-foreground">Type: {job.name}</p>
             {job.failedReason ? (

@@ -120,17 +120,14 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
   let stepSeq = 0;
   let lastToolError: { tool: string; error?: string } | null = null;
-    const repeatedCallCounts = new Map<string, number>();
-    const repeatedResultCounts = new Map<string, number>();
+  const repeatedCallCounts = new Map<string, number>();
+  const repeatedResultCounts = new Map<string, number>();
   const repeatedSpawnCounts = new Map<string, number>();
   let blockedSpawnCount = 0;
 
   try {
     // 2. Load agent plugins
-    const plugins = await db
-      .select()
-      .from(agentPlugins)
-      .where(eq(agentPlugins.agentId, agentId));
+    const plugins = await db.select().from(agentPlugins).where(eq(agentPlugins.agentId, agentId));
 
     const enabledPluginNames = plugins
       .filter((plugin) => plugin.enabled)
@@ -182,8 +179,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
       return {
         ...tool,
-        pinned: setting?.pinned ?? (hasUserToolSettings ? false : tool.pinned ?? false),
-        important: setting?.important ?? (hasUserToolSettings ? false : tool.important ?? false),
+        pinned: setting?.pinned ?? (hasUserToolSettings ? false : (tool.pinned ?? false)),
+        important: setting?.important ?? (hasUserToolSettings ? false : (tool.important ?? false)),
       };
     });
 
@@ -449,7 +446,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       /^(hi|hey|hello|yo|sup|hola|hallo|guten tag|good (morning|afternoon|evening))\b/i;
     const fallbackMessage = greetingPattern.test(inputText)
       ? 'Hey! How can I help?'
-      : "Sorry, I got stuck while planning. Could you rephrase or be more specific?";
+      : 'Sorry, I got stuck while planning. Could you rephrase or be more specific?';
 
     const finishRun = async (message: string, reason: string) => {
       await db
@@ -497,7 +494,10 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       return true;
     };
 
-    const recordIterationAndCheck = async (commandSignature: string | null, hadToolCall: boolean) => {
+    const recordIterationAndCheck = async (
+      commandSignature: string | null,
+      hadToolCall: boolean
+    ) => {
       if (actionCount === 0) {
         return false;
       }
@@ -565,13 +565,16 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         budgetDecisionLogged = false;
         lastBudgetDecision = null;
       }
-      const transcriptWindow = trimTranscript(transcript, config.runTranscriptLimit, config.runTranscriptTokenLimit);
+      const transcriptWindow = trimTranscript(
+        transcript,
+        config.runTranscriptLimit,
+        config.runTranscriptTokenLimit
+      );
 
       const subagentResults =
         run.kind === 'coordinator' ? await loadSubagentResults(db, runId) : [];
 
-      const agentLevel =
-        run.kind === 'subagent' ? ((run.inputJson as any)?.agentLevel ?? 1) : 0;
+      const agentLevel = run.kind === 'subagent' ? ((run.inputJson as any)?.agentLevel ?? 1) : 0;
 
       const userPayload = {
         task: run.inputText,
@@ -682,9 +685,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           }
           continue;
         }
-        appendSystemNoteOnce(
-          'Proceeding without set_run_limits; using the current run budget.'
-        );
+        appendSystemNoteOnce('Proceeding without set_run_limits; using the current run budget.');
         runLimitsSet = true;
       }
 
@@ -862,10 +863,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         transcript.push({ type: 'tool_call', name: toolCall.name, args: toolCall.args });
 
         if (config.runDebugPrompts) {
-          logger.debug(
-            { runId, iteration, toolCall: truncateForLog(toolCall) },
-            'Run tool call'
-          );
+          logger.debug({ runId, iteration, toolCall: truncateForLog(toolCall) }, 'Run tool call');
         }
 
         const result = await executeToolCall(toolCall, {
@@ -884,10 +882,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         stepSeq += 2;
         transcript.push({ type: 'tool_result', name: toolCall.name, result });
         if (config.runDebugPrompts) {
-          logger.debug(
-            { runId, iteration, toolResult: truncateForLog(result) },
-            'Run tool result'
-          );
+          logger.debug({ runId, iteration, toolResult: truncateForLog(result) }, 'Run tool result');
         }
         const toolResultSignature = `tool_result:${toolCall.name}:${stableStringify(
           toolCall.args
@@ -980,7 +975,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
               runId,
               seq: stepSeq++,
               type: 'message',
-              resultJson: { event: 'validation_feedback', feedback: validation.feedback, retry: validation.retry },
+              resultJson: {
+                event: 'validation_feedback',
+                feedback: validation.feedback,
+                retry: validation.retry,
+              },
             });
             if (validation.retry) {
               limitationRequired = false;
@@ -1024,9 +1023,12 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         const hasToolCalls = transcriptWindow.some((entry) => entry.type === 'tool_call');
         const hasOutputUpdates = transcriptWindow.some((entry) => entry.type === 'output_update');
         const asksUser =
-          message.trim().endsWith('?') ||
-          /bitte|please|could you|can you/i.test(message);
-        if ((!hasToolCalls && !hasOutputUpdates && !outputText) || asksUser || toolFailureCounts.size > 0) {
+          message.trim().endsWith('?') || /bitte|please|could you|can you/i.test(message);
+        if (
+          (!hasToolCalls && !hasOutputUpdates && !outputText) ||
+          asksUser ||
+          toolFailureCounts.size > 0
+        ) {
           const validation = await validateOutput(message, 'send_message', userPayload);
           if (validation.decision === 'revise') {
             appendSystemNoteOnce(
@@ -1036,7 +1038,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
               runId,
               seq: stepSeq++,
               type: 'message',
-              resultJson: { event: 'validation_feedback', feedback: validation.feedback, retry: validation.retry },
+              resultJson: {
+                event: 'validation_feedback',
+                feedback: validation.feedback,
+                retry: validation.retry,
+              },
             });
             if (validation.retry) {
               limitationRequired = false;
@@ -1078,10 +1084,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           progressTick += 1;
         }
 
-        await db
-          .update(runs)
-          .set({ outputText, updatedAt: new Date() })
-          .where(eq(runs.id, runId));
+        await db.update(runs).set({ outputText, updatedAt: new Date() }).where(eq(runs.id, runId));
 
         await appendRunStep(db, {
           runId,
@@ -1104,7 +1107,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             runId,
             seq: stepSeq++,
             type: 'message',
-            resultJson: { event: 'validation_feedback', feedback: validation.feedback, retry: validation.retry },
+            resultJson: {
+              event: 'validation_feedback',
+              feedback: validation.feedback,
+              retry: validation.retry,
+            },
           });
           if (validation.retry) {
             limitationRequired = false;
@@ -1198,11 +1205,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           continue;
         }
         if (command.category === 'requirements' && !requirementsRewriteRequested) {
-          const tooSimilarToTask = run.inputText
-            ? isTooSimilar(content, run.inputText)
-            : false;
-          const tooSimilarToPlan =
-            lastPlanNote && isTooSimilar(content, lastPlanNote);
+          const tooSimilarToTask = run.inputText ? isTooSimilar(content, run.inputText) : false;
+          const tooSimilarToPlan = lastPlanNote && isTooSimilar(content, lastPlanNote);
           if (tooSimilarToTask || tooSimilarToPlan || !hasOutputKeyword(content)) {
             appendSystemNoteOnce(
               'Rewrite requirements as an output specification and decision criteria (what the user will receive), not a restatement of the task.'
@@ -1212,17 +1216,19 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           }
         }
         if (command.category === 'plan' && !planRewriteRequested) {
-          const tooSimilarToTask = run.inputText
-            ? isTooSimilar(content, run.inputText)
-            : false;
+          const tooSimilarToTask = run.inputText ? isTooSimilar(content, run.inputText) : false;
           const tooSimilarToRequirements =
             lastRequirementsNote && isTooSimilar(content, lastRequirementsNote);
           const taskHintsTools = run.inputText
             ? /(weather|forecast|wetter|temperature|rain|snow)/i.test(run.inputText)
             : false;
-          const missingTools =
-            toolNames.length > 0 && taskHintsTools && !mentionsAnyTool(content);
-          if (tooSimilarToTask || tooSimilarToRequirements || !hasNumberedSteps(content) || missingTools) {
+          const missingTools = toolNames.length > 0 && taskHintsTools && !mentionsAnyTool(content);
+          if (
+            tooSimilarToTask ||
+            tooSimilarToRequirements ||
+            !hasNumberedSteps(content) ||
+            missingTools
+          ) {
             appendSystemNoteOnce(
               'Rewrite plan as concrete numbered steps. Name the tools you will call and key parameters (e.g., date ranges).'
             );
@@ -1233,8 +1239,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         if (command.category === 'artifact' && !artifactRewriteRequested) {
           const tooSimilarToRequirements =
             lastRequirementsNote && isTooSimilar(content, lastRequirementsNote, 0.6);
-          const tooSimilarToPlan =
-            lastPlanNote && isTooSimilar(content, lastPlanNote, 0.6);
+          const tooSimilarToPlan = lastPlanNote && isTooSimilar(content, lastPlanNote, 0.6);
           if (tooSimilarToRequirements || tooSimilarToPlan) {
             appendSystemNoteOnce(
               'Rewrite the artifact as a single sentence about the immediate next step you are about to take (do not repeat requirements or plan).'
@@ -1322,7 +1327,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             runId,
             seq: stepSeq++,
             type: 'message',
-            resultJson: { event: 'validation_feedback', feedback: validation.feedback, retry: validation.retry },
+            resultJson: {
+              event: 'validation_feedback',
+              feedback: validation.feedback,
+              retry: validation.retry,
+            },
           });
           if (validation.retry) {
             limitationRequired = false;
@@ -1349,7 +1358,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           resultJson: {
             event: 'sleep',
             reason: command.reason ?? null,
-            wakeAt: wakeAtDate ? wakeAtDate.toISOString() : command.wakeAt ?? null,
+            wakeAt: wakeAtDate ? wakeAtDate.toISOString() : (command.wakeAt ?? null),
             delaySeconds: command.delaySeconds ?? null,
             cron: command.cron ?? null,
           },
@@ -1396,8 +1405,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         forceActionNext = false;
         actionViolationCount = 0;
         consecutiveNotes = 0;
-        const agentLevel =
-          run.kind === 'subagent' ? ((run.inputJson as any)?.agentLevel ?? 1) : 0;
+        const agentLevel = run.kind === 'subagent' ? ((run.inputJson as any)?.agentLevel ?? 1) : 0;
         if (agentLevel >= 2) {
           await appendRunStep(db, {
             runId,
@@ -1414,7 +1422,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           );
           continue;
         }
-        const subagents = command.type === 'spawn_subagent' ? [command.subagent] : command.subagents;
+        const subagents =
+          command.type === 'spawn_subagent' ? [command.subagent] : command.subagents;
         const created: Array<{ runId: string; task: string; profile?: string | null }> = [];
         const specs = subagents.map((sub) => ({
           profile: sub.profile ?? null,
@@ -1600,7 +1609,10 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     return;
   } catch (err) {
     logger.error('Run failed', { runId, err });
-    await db.update(runs).set({ status: 'failed', updatedAt: new Date() }).where(eq(runs.id, runId));
+    await db
+      .update(runs)
+      .set({ status: 'failed', updatedAt: new Date() })
+      .where(eq(runs.id, runId));
 
     if (run.kind !== 'subagent') {
       try {
@@ -1716,10 +1728,7 @@ async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promis
     if (fallbackTool && fallbackTool.commands.length === 1) {
       const onlyCommand = fallbackTool.commands[0]?.name;
       if (onlyCommand) {
-        return await executeToolCall(
-          { ...toolCall, name: `${toolCall.name}.${onlyCommand}` },
-          ctx
-        );
+        return await executeToolCall({ ...toolCall, name: `${toolCall.name}.${onlyCommand}` }, ctx);
       }
     }
     const result: ToolResult = {
@@ -1835,7 +1844,9 @@ async function executeToolCall(toolCall: ToolCall, ctx: ToolCallContext): Promis
       id: toolCall.id,
       success: payloadSuccess,
       result: resultPayload,
-      error: payloadSuccess ? undefined : String((resultPayload as { error?: unknown }).error ?? ''),
+      error: payloadSuccess
+        ? undefined
+        : String((resultPayload as { error?: unknown }).error ?? ''),
     };
 
     await db.insert(runSteps).values({
@@ -1947,11 +1958,7 @@ function applyOutputUpdate(
   return output.trim();
 }
 
-function trimTranscript(
-  transcript: TranscriptEntry[],
-  maxEntries: number,
-  maxTokens: number
-) {
+function trimTranscript(transcript: TranscriptEntry[], maxEntries: number, maxTokens: number) {
   const limited = transcript.slice(-maxEntries);
   let totalTokens = 0;
   const result: TranscriptEntry[] = [];
@@ -2005,9 +2012,7 @@ async function loadCoreMemories(db: ReturnType<typeof getDb>, userId: string) {
   }
 
   for (const list of byLevel.values()) {
-    list.sort(
-      (a, b) => (b.lastSeenAt?.getTime?.() ?? 0) - (a.lastSeenAt?.getTime?.() ?? 0)
-    );
+    list.sort((a, b) => (b.lastSeenAt?.getTime?.() ?? 0) - (a.lastSeenAt?.getTime?.() ?? 0));
   }
 
   const selected: typeof rows = [];
@@ -2104,7 +2109,6 @@ async function wakeParentRun(
     agentId,
   });
 }
-
 
 function buildToolPrompt(tools: ToolDef[], kind: string) {
   if (kind === 'coordinator') {

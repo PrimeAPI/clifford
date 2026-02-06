@@ -49,11 +49,7 @@ const allowedDiscordUsernames = parseJson<unknown[]>(
   'ALLOWED_DISCORD_USERNAMES',
   []
 );
-const knownDiscordUsers = parseJson<unknown[]>(
-  env.KNOWN_DISCORD_USERS,
-  'KNOWN_DISCORD_USERS',
-  []
-);
+const knownDiscordUsers = parseJson<unknown[]>(env.KNOWN_DISCORD_USERS, 'KNOWN_DISCORD_USERS', []);
 
 export const config = {
   port: env.API_PORT,

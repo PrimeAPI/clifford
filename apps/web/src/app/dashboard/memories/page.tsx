@@ -204,8 +204,8 @@ export default function MemoriesPage() {
         <CardHeader>
           <CardTitle>Memory Toggle</CardTitle>
           <CardDescription>
-            Disable to stop memory loading and writing. Warning: enabling memory can increase
-            token usage for each chat.
+            Disable to stop memory loading and writing. Warning: enabling memory can increase token
+            usage for each chat.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex items-center gap-4">
@@ -342,7 +342,9 @@ export default function MemoriesPage() {
                 <label className="text-sm font-medium">Confidence (0-1)</label>
                 <Input
                   value={newMemory.confidence}
-                  onChange={(e) => setNewMemory((prev) => ({ ...prev, confidence: e.target.value }))}
+                  onChange={(e) =>
+                    setNewMemory((prev) => ({ ...prev, confidence: e.target.value }))
+                  }
                 />
               </div>
             </div>
@@ -423,9 +425,7 @@ function EditMemoryDialog({
             <label className="text-sm font-medium">Key</label>
             <Input
               value={draft.key}
-              onChange={(e) =>
-                setDraft((prev) => (prev ? { ...prev, key: e.target.value } : prev))
-              }
+              onChange={(e) => setDraft((prev) => (prev ? { ...prev, key: e.target.value } : prev))}
             />
           </div>
           <div className="space-y-2 md:col-span-2">
@@ -442,9 +442,7 @@ function EditMemoryDialog({
             <Input
               value={draft.confidence}
               onChange={(e) =>
-                setDraft((prev) =>
-                  prev ? { ...prev, confidence: Number(e.target.value) } : prev
-                )
+                setDraft((prev) => (prev ? { ...prev, confidence: Number(e.target.value) } : prev))
               }
             />
           </div>

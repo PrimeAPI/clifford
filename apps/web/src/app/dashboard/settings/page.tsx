@@ -140,7 +140,8 @@ export default function SettingsPage() {
       });
       const data = (await res.json()) as { defaultSystemPrompt?: string };
       setDefaultSystemPrompt(
-        data.defaultSystemPrompt || 'You are Clifford, a very skilled and highly complex AI-Assistent!'
+        data.defaultSystemPrompt ||
+          'You are Clifford, a very skilled and highly complex AI-Assistent!'
       );
     } catch (err) {
       console.error('Failed to load system prompt:', err);

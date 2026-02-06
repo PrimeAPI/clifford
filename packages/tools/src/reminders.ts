@@ -38,7 +38,13 @@ async function loadReminderState(tenantId: string, agentId: string) {
   const rows = await db
     .select()
     .from(memoryKv)
-    .where(and(eq(memoryKv.tenantId, tenantId), eq(memoryKv.agentId, agentId), eq(memoryKv.key, 'reminders')))
+    .where(
+      and(
+        eq(memoryKv.tenantId, tenantId),
+        eq(memoryKv.agentId, agentId),
+        eq(memoryKv.key, 'reminders')
+      )
+    )
     .limit(1);
 
   if (rows.length === 0) {
@@ -124,7 +130,8 @@ export const remindersTool: ToolDef = {
     {
       name: 'set',
       shortDescription: 'Create a new reminder',
-      longDescription: 'Registers a reminder with metadata including due time, repeat options, and prompt.',
+      longDescription:
+        'Registers a reminder with metadata including due time, repeat options, and prompt.',
       usageExample:
         '{"name":"reminders.set","args":{"reminder":{"name":"Weekly review","description":"Plan next week","dueAt":"2026-02-07T09:00:00Z","repeats":true,"repeatRule":"weekly","prompt":"Time for the weekly review."}}}',
       argsSchema: remindersSetArgs,

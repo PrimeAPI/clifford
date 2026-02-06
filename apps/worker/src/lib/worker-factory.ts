@@ -13,19 +13,18 @@ export class WorkerFactory {
   private readonly connection = { url: config.redisUrl };
   private readonly concurrency: number;
 
-  constructor(private readonly logger: Logger, options: WorkerFactoryOptions = {}) {
+  constructor(
+    private readonly logger: Logger,
+    options: WorkerFactoryOptions = {}
+  ) {
     this.concurrency = options.concurrency ?? config.workerConcurrency;
   }
 
   createWorker<T>(queueName: string, processor: Processor<T>) {
-    const worker = new Worker<T>(
-      queueName,
-      async (job) => await processor(job),
-      {
-        connection: this.connection,
-        concurrency: this.concurrency,
-      }
-    );
+    const worker = new Worker<T>(queueName, async (job) => await processor(job), {
+      connection: this.connection,
+      concurrency: this.concurrency,
+    });
 
     worker.on('completed', (job) => {
       this.logger.info({ jobId: job.id, queue: queueName }, 'Job completed');

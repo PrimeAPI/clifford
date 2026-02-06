@@ -140,13 +140,9 @@ export async function processMemoryWrite(job: Job<MemoryWriteJob>, logger: Logge
 
   let responseText = '';
   try {
-    responseText = await callOpenAIWithFallback(
-      apiKey,
-      model,
-      fallbackModel,
-      messagesForModel,
-      { temperature: 0 }
-    );
+    responseText = await callOpenAIWithFallback(apiKey, model, fallbackModel, messagesForModel, {
+      temperature: 0,
+    });
   } catch (err) {
     logger.error({ err, contextId, userId }, 'Memory writer model call failed');
     return { ok: false, reason: 'model_call_failed' };
@@ -175,11 +171,7 @@ export async function processMemoryWrite(job: Job<MemoryWriteJob>, logger: Logge
   };
 }
 
-async function loadContextMessages(
-  db: ReturnType<typeof getDb>,
-  contextId: string,
-  limit: number
-) {
+async function loadContextMessages(db: ReturnType<typeof getDb>, contextId: string, limit: number) {
   const rows = await db
     .select()
     .from(messages)
@@ -187,9 +179,7 @@ async function loadContextMessages(
     .orderBy(desc(messages.createdAt))
     .limit(limit);
 
-  return rows
-    .reverse()
-    .map((row) => ({
+  return rows.reverse().map((row) => ({
     direction: row.direction,
     content: row.content,
     createdAt: row.createdAt?.toISOString?.() ?? undefined,
@@ -265,13 +255,7 @@ function normalizeMemoryOps(candidate: unknown): unknown {
     if (typeof entry !== 'object' || entry === null) return entry;
     const raw = entry as Record<string, unknown>;
     const opValue =
-      raw.op ??
-      raw.action ??
-      raw.type ??
-      raw.operation ??
-      raw.intent ??
-      raw.kind ??
-      raw.command;
+      raw.op ?? raw.action ?? raw.type ?? raw.operation ?? raw.intent ?? raw.kind ?? raw.command;
     const op = typeof opValue === 'string' ? opValue.toLowerCase() : opValue;
     const levelValue = raw.level;
     const level =
@@ -282,9 +266,7 @@ function normalizeMemoryOps(candidate: unknown): unknown {
           : levelValue;
     const confidenceValue = raw.confidence;
     const confidence =
-      typeof confidenceValue === 'string'
-        ? Number.parseFloat(confidenceValue)
-        : confidenceValue;
+      typeof confidenceValue === 'string' ? Number.parseFloat(confidenceValue) : confidenceValue;
     return {
       ...raw,
       op,
@@ -295,24 +277,20 @@ function normalizeMemoryOps(candidate: unknown): unknown {
   });
 }
 
-function buildHeuristicOps(
-  segment: Array<{ direction: string; content: string }>
-): MemoryOp[] {
+function buildHeuristicOps(segment: Array<{ direction: string; content: string }>): MemoryOp[] {
   const ops: MemoryOp[] = [];
   const inbound = segment.filter((entry) => entry.direction === 'inbound');
   for (const entry of inbound) {
     const name = extractName(entry.content);
     if (name) {
-      ops.push(
-        {
-          op: 'add',
-          level: 1,
-          module: 'identity',
-          key: 'name',
-          value: name,
-          confidence: 0.7,
-        }
-      );
+      ops.push({
+        op: 'add',
+        level: 1,
+        module: 'identity',
+        key: 'name',
+        value: name,
+        confidence: 0.7,
+      });
       break;
     }
   }
@@ -469,15 +447,10 @@ async function applyMemoryOps({
 }) {
   let applied = 0;
   let skipped = 0;
-  const existing = await db
-    .select()
-    .from(memoryItems)
-    .where(eq(memoryItems.userId, userId));
+  const existing = await db.select().from(memoryItems).where(eq(memoryItems.userId, userId));
 
   const byId = new Map(existing.map((item) => [item.id, item]));
-  const byModuleKey = new Map(
-    existing.map((item) => [`${item.module}:${item.key}`, item])
-  );
+  const byModuleKey = new Map(existing.map((item) => [`${item.module}:${item.key}`, item]));
 
   for (const op of ops) {
     const moduleKey = op.module && op.key ? `${op.module}:${op.key}` : null;
@@ -596,11 +569,7 @@ async function applyMemoryOps({
   return { applied, skipped };
 }
 
-async function dedupeAndEnforceCaps(
-  db: ReturnType<typeof getDb>,
-  userId: string,
-  logger: Logger
-) {
+async function dedupeAndEnforceCaps(db: ReturnType<typeof getDb>, userId: string, logger: Logger) {
   const items = await db
     .select()
     .from(memoryItems)
@@ -690,11 +659,20 @@ async function dedupeAndEnforceCaps(
       .update(memoryItems)
       .set({ archived: true })
       .where(
-        and(eq(memoryItems.userId, userId), inArray(memoryItems.id, toArchive.map((i) => i.id)))
+        and(
+          eq(memoryItems.userId, userId),
+          inArray(
+            memoryItems.id,
+            toArchive.map((i) => i.id)
+          )
+        )
       );
   }
 }
 
 function normalizeValue(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }

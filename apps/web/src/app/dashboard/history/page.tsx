@@ -127,39 +127,42 @@ export default function HistoryPage() {
   const [queueFilter, setQueueFilter] = useState<(typeof queueFilterOptions)[number]>('all');
   const [statusFilter, setStatusFilter] = useState('all');
 
-  const loadRuns = useCallback(async (options?: { reset?: boolean }) => {
-    const nextOffset = options?.reset ? 0 : runsOffset;
-    setLoadingRuns(true);
-    try {
-      const res = await fetch(`/api/runs?limit=${RUN_LIMIT}&offset=${nextOffset}`, {
-        headers: { 'X-Tenant-Id': DEMO_TENANT_ID },
-      });
-      if (!res.ok) {
-        throw new Error('Failed to load runs');
+  const loadRuns = useCallback(
+    async (options?: { reset?: boolean }) => {
+      const nextOffset = options?.reset ? 0 : runsOffset;
+      setLoadingRuns(true);
+      try {
+        const res = await fetch(`/api/runs?limit=${RUN_LIMIT}&offset=${nextOffset}`, {
+          headers: { 'X-Tenant-Id': DEMO_TENANT_ID },
+        });
+        if (!res.ok) {
+          throw new Error('Failed to load runs');
+        }
+        const data = (await res.json()) as {
+          runs: RunRecord[];
+          total: number;
+          limit: number;
+          offset: number;
+          hasMore: boolean;
+        };
+        setRuns((prev) => (options?.reset ? (data.runs ?? []) : [...prev, ...(data.runs ?? [])]));
+        setRunsOffset(data.offset + (data.runs?.length ?? 0));
+        setRunsTotal(data.total ?? 0);
+        setHasMoreRuns(Boolean(data.hasMore));
+      } catch (err) {
+        console.error(err);
+        if (options?.reset) {
+          setRuns([]);
+          setRunsOffset(0);
+          setRunsTotal(0);
+          setHasMoreRuns(false);
+        }
+      } finally {
+        setLoadingRuns(false);
       }
-      const data = (await res.json()) as {
-        runs: RunRecord[];
-        total: number;
-        limit: number;
-        offset: number;
-        hasMore: boolean;
-      };
-      setRuns((prev) => (options?.reset ? data.runs ?? [] : [...prev, ...(data.runs ?? [])]));
-      setRunsOffset(data.offset + (data.runs?.length ?? 0));
-      setRunsTotal(data.total ?? 0);
-      setHasMoreRuns(Boolean(data.hasMore));
-    } catch (err) {
-      console.error(err);
-      if (options?.reset) {
-        setRuns([]);
-        setRunsOffset(0);
-        setRunsTotal(0);
-        setHasMoreRuns(false);
-      }
-    } finally {
-      setLoadingRuns(false);
-    }
-  }, [runsOffset]);
+    },
+    [runsOffset]
+  );
 
   const refreshAll = useCallback(() => {
     loadQueueStatus();
@@ -172,8 +175,7 @@ export default function HistoryPage() {
 
   const tasks = useMemo(() => {
     const combined = [...buildRunTasks(runs), ...buildQueueTasks(queueStatus)];
-    return combined
-      .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+    return combined.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
   }, [runs, queueStatus]);
 
   const statusOptions = useMemo(() => {
@@ -190,7 +192,8 @@ export default function HistoryPage() {
       if (!query) return true;
 
       const metaText = task.meta ? formatMetaLine(task.meta) : '';
-      const base = `${task.id} ${task.queue} ${task.status} ${task.name} ${task.detail ?? ''} ${metaText}`.toLowerCase();
+      const base =
+        `${task.id} ${task.queue} ${task.status} ${task.name} ${task.detail ?? ''} ${metaText}`.toLowerCase();
       if (base.includes(query)) return true;
       if (task.data) {
         try {
@@ -260,7 +263,9 @@ export default function HistoryPage() {
             <select
               className="h-10 rounded-md border border-input bg-background px-3 text-sm"
               value={queueFilter}
-              onChange={(e) => setQueueFilter(e.target.value as (typeof queueFilterOptions)[number])}
+              onChange={(e) =>
+                setQueueFilter(e.target.value as (typeof queueFilterOptions)[number])
+              }
             >
               {queueFilterOptions.map((option) => (
                 <option key={option} value={option}>
@@ -333,11 +338,7 @@ export default function HistoryPage() {
                   ) : null}
                   {task.kind === 'run' ? (
                     <div className="mt-3">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => openRunDetails(task.id)}
-                      >
+                      <Button variant="outline" size="sm" onClick={() => openRunDetails(task.id)}>
                         View Run Details
                       </Button>
                     </div>

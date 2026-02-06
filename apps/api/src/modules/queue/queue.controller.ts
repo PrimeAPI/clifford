@@ -79,14 +79,18 @@ export async function queueRoutes(app: FastifyInstance) {
         },
         messages: {
           counts: messageCounts,
-          active: messageActive.map((job) => serializeJob(job, messageMeta.get(job.id) ?? undefined)),
+          active: messageActive.map((job) =>
+            serializeJob(job, messageMeta.get(job.id) ?? undefined)
+          ),
           waiting: messageWaiting.map((job) =>
             serializeJob(job, messageMeta.get(job.id) ?? undefined)
           ),
           completed: messageCompleted.map((job) =>
             serializeJob(job, messageMeta.get(job.id) ?? undefined)
           ),
-          failed: messageFailed.map((job) => serializeJob(job, messageMeta.get(job.id) ?? undefined)),
+          failed: messageFailed.map((job) =>
+            serializeJob(job, messageMeta.get(job.id) ?? undefined)
+          ),
         },
         deliveries: {
           counts: deliveryCounts,

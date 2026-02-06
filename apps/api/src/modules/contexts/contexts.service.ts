@@ -13,11 +13,9 @@ export async function loadRecentMessages(
     .orderBy(desc(messages.createdAt))
     .limit(limit);
 
-  return rows
-    .reverse()
-    .map((row) => ({
-      direction: row.direction,
-      content: row.content,
-      createdAt: row.createdAt?.toISOString?.() ?? undefined,
-    }));
+  return rows.reverse().map((row) => ({
+    direction: row.direction,
+    content: row.content,
+    createdAt: row.createdAt?.toISOString?.() ?? undefined,
+  }));
 }

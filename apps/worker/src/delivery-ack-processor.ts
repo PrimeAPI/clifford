@@ -17,7 +17,7 @@ export async function processDeliveryAck(job: Job<DeliveryAckJob>, logger: Logge
     .update(messages)
     .set({
       deliveryStatus: status,
-      deliveryError: status === 'failed' ? error ?? 'Delivery failed' : null,
+      deliveryError: status === 'failed' ? (error ?? 'Delivery failed') : null,
       deliveredAt: status === 'delivered' ? new Date() : null,
     })
     .where(eq(messages.id, messageId));
