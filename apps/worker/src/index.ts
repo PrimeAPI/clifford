@@ -1,12 +1,11 @@
-import { Worker } from 'bullmq';
 import pino from 'pino';
 import { config } from './config.js';
-import { processRun } from './run-processor.js';
-import type { RunJob, MessageJob, DeliveryAckJob, MemoryWriteJob, WakeJob } from '@clifford/sdk';
-import { processMessage } from './message-processor.js';
-import { processDeliveryAck } from './delivery-ack-processor.js';
-import { processMemoryWrite } from './memory-write-processor.js';
-import { processWake } from './wake-processor.js';
+import { WorkerFactory } from './lib/worker-factory.js';
+import { createRunJob } from './jobs/run.job.js';
+import { createMessageJob } from './jobs/message.job.js';
+import { createDeliveryAckJob } from './jobs/delivery-ack.job.js';
+import { createMemoryWriteJob } from './jobs/memory-write.job.js';
+import { createWakeJob } from './jobs/wake.job.js';
 import {
   QUEUE_DELIVERY_ACKS,
   QUEUE_MEMORY_WRITES,
@@ -16,144 +15,31 @@ import {
 } from '@clifford/core';
 
 const logger = pino({ level: config.logLevel });
+const factory = new WorkerFactory(logger);
 
-const connection = {
-  url: config.redisUrl,
-};
+const workerSpecs = [
+  { queue: QUEUE_RUNS, processor: createRunJob(logger) },
+  { queue: QUEUE_MESSAGES, processor: createMessageJob(logger) },
+  { queue: QUEUE_DELIVERY_ACKS, processor: createDeliveryAckJob(logger) },
+  { queue: QUEUE_MEMORY_WRITES, processor: createMemoryWriteJob(logger) },
+  { queue: QUEUE_WAKE, processor: createWakeJob(logger) },
+];
 
-const runWorker = new Worker<RunJob>(
-  QUEUE_RUNS,
-  async (job) => {
-    await processRun(job, logger);
-  },
-  {
-    connection,
-    concurrency: config.workerConcurrency,
-  }
-);
+const workers = workerSpecs.map(({ queue, processor }) => factory.createWorker(queue, processor));
 
-const messageWorker = new Worker<MessageJob>(
-  QUEUE_MESSAGES,
-  async (job) => {
-    await processMessage(job, logger);
-  },
-  {
-    connection,
-    concurrency: config.workerConcurrency,
-  }
-);
-
-const deliveryAckWorker = new Worker<DeliveryAckJob>(
-  QUEUE_DELIVERY_ACKS,
-  async (job) => {
-    await processDeliveryAck(job, logger);
-  },
-  {
-    connection,
-    concurrency: config.workerConcurrency,
-  }
-);
-
-const memoryWriteWorker = new Worker<MemoryWriteJob>(
-  QUEUE_MEMORY_WRITES,
-  async (job) => {
-    return await processMemoryWrite(job, logger);
-  },
-  {
-    connection,
-    concurrency: config.workerConcurrency,
-  }
-);
-
-const wakeWorker = new Worker<WakeJob>(
-  QUEUE_WAKE,
-  async (job) => {
-    return await processWake(job, logger);
-  },
-  {
-    connection,
-    concurrency: config.workerConcurrency,
-  }
-);
-
-runWorker.on('completed', (job) => {
-  logger.info({ jobId: job.id }, 'Job completed');
-});
-
-runWorker.on('failed', (job, err) => {
-  logger.error({ jobId: job?.id, err }, 'Job failed');
-});
-
-messageWorker.on('completed', (job) => {
-  logger.info({ jobId: job.id }, 'Message job completed');
-});
-
-messageWorker.on('failed', (job, err) => {
-  logger.error({ jobId: job?.id, err }, 'Message job failed');
-});
-
-deliveryAckWorker.on('completed', (job) => {
-  logger.info({ jobId: job.id }, 'Delivery ack completed');
-});
-
-deliveryAckWorker.on('failed', (job, err) => {
-  logger.error({ jobId: job?.id, err }, 'Delivery ack failed');
-});
-
-memoryWriteWorker.on('completed', (job) => {
-  logger.info({ jobId: job.id }, 'Memory write completed');
-});
-
-memoryWriteWorker.on('failed', (job, err) => {
-  logger.error({ jobId: job?.id, err }, 'Memory write failed');
-});
-
-wakeWorker.on('completed', (job) => {
-  logger.info({ jobId: job.id }, 'Wake job completed');
-});
-
-wakeWorker.on('failed', (job, err) => {
-  logger.error({ jobId: job?.id, err }, 'Wake job failed');
-});
-
-logger.info(
-  { concurrency: config.workerConcurrency },
-  `Worker started, listening for jobs on ${QUEUE_RUNS}`
-);
-logger.info(
-  { concurrency: config.workerConcurrency },
-  `Worker started, listening for jobs on ${QUEUE_MESSAGES}`
-);
-logger.info(
-  { concurrency: config.workerConcurrency },
-  `Worker started, listening for jobs on ${QUEUE_DELIVERY_ACKS}`
-);
-logger.info(
-  { concurrency: config.workerConcurrency },
-  `Worker started, listening for jobs on ${QUEUE_MEMORY_WRITES}`
-);
-logger.info(
-  { concurrency: config.workerConcurrency },
-  `Worker started, listening for jobs on ${QUEUE_WAKE}`
-);
+for (const { queue } of workerSpecs) {
+  logger.info(
+    { concurrency: config.workerConcurrency },
+    `Worker started, listening for jobs on ${queue}`
+  );
+}
 
 // Graceful shutdown
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down');
-  await runWorker.close();
-  await messageWorker.close();
-  await deliveryAckWorker.close();
-  await memoryWriteWorker.close();
-  await wakeWorker.close();
+const shutdown = async (signal: string) => {
+  logger.info({ signal }, 'Shutdown signal received, shutting down');
+  await Promise.all(workers.map((worker) => worker.close()));
   process.exit(0);
-});
+};
 
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down');
-  await runWorker.close();
-  await messageWorker.close();
-  await deliveryAckWorker.close();
-  await memoryWriteWorker.close();
-  await wakeWorker.close();
-  process.exit(0);
-});
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

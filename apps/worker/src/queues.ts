@@ -1,15 +1,21 @@
 import { Queue } from 'bullmq';
 import type { DeliveryJob, DeliveryAckJob, MemoryWriteJob, RunJob } from '@clifford/sdk';
 import { config } from './config.js';
+import {
+  QUEUE_DELIVERIES,
+  QUEUE_DELIVERY_ACKS,
+  QUEUE_MEMORY_WRITES,
+  QUEUE_RUNS,
+} from '@clifford/core';
 
 const connection = {
   url: config.redisUrl,
 };
 
-export const deliveryQueue = new Queue<DeliveryJob>('clifford-deliveries', { connection });
-export const deliveryAckQueue = new Queue<DeliveryAckJob>('clifford-delivery-acks', { connection });
-export const memoryWriteQueue = new Queue<MemoryWriteJob>('clifford-memory-writes', { connection });
-export const runQueue = new Queue<RunJob>('clifford-runs', { connection });
+export const deliveryQueue = new Queue<DeliveryJob>(QUEUE_DELIVERIES, { connection });
+export const deliveryAckQueue = new Queue<DeliveryAckJob>(QUEUE_DELIVERY_ACKS, { connection });
+export const memoryWriteQueue = new Queue<MemoryWriteJob>(QUEUE_MEMORY_WRITES, { connection });
+export const runQueue = new Queue<RunJob>(QUEUE_RUNS, { connection });
 
 export async function enqueueDelivery(job: DeliveryJob) {
   await deliveryQueue.add('delivery', job, {
