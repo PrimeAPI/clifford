@@ -13,7 +13,7 @@ import {
   userToolSettings,
   triggers,
 } from '@clifford/db';
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, inArray } from 'drizzle-orm';
 import { PolicyEngine } from '@clifford/policy';
 import { ToolRegistry } from './tool-registry.js';
 import { nanoid } from 'nanoid';
@@ -21,7 +21,7 @@ import { config } from './config.js';
 import { decryptSecret } from './crypto.js';
 import { callOpenAIWithFallback, type OpenAIMessage } from './openai-client.js';
 import { ZodError } from 'zod';
-import { enqueueDelivery, enqueueRun } from './queues.js';
+import { enqueueDelivery, enqueueRun, enqueueRunWake } from './queues.js';
 import { randomUUID } from 'crypto';
 
 type RunCommand =
@@ -33,6 +33,29 @@ type RunCommand =
   | {
       type: 'send_message';
       message: string;
+    }
+  | {
+      type: 'deliver_subagent_output';
+      runId: string;
+    }
+  | {
+      type: 'request_parent';
+      message: string;
+    }
+  | {
+      type: 'reply_subagent';
+      runId: string;
+      message: string;
+    }
+  | {
+      type: 'retry_subagent';
+      runId: string;
+      feedback?: string;
+    }
+  | {
+      type: 'queue_op';
+      action: 'push' | 'shift' | 'clear' | 'set';
+      items?: string[];
     }
   | {
       type: 'set_output';
@@ -63,6 +86,7 @@ type SubagentSpec = {
   id?: string;
   profile?: string;
   task: string;
+  agentLevel?: number;
   tools?: string[];
   context?: Array<{ role: 'user' | 'assistant'; content: string }>;
 };
@@ -94,6 +118,17 @@ type TranscriptEntry =
   | { type: 'system_note'; content: string }
   | { type: 'validation_missing'; detail: string };
 
+type RunState = {
+  queue: string[];
+  inbox: Array<{ fromRunId: string; message: string; at: string }>;
+  waitingForParent?: boolean;
+  autoRecoverySpawned?: boolean;
+  lastRequestParentMessage?: string;
+  requestParentRepeatCount?: number;
+  lastBlockReason?: string;
+  lastBlockDetail?: string;
+};
+
 export async function processRun(job: Job<RunJob>, logger: Logger) {
   const { runId, tenantId, agentId } = job.data;
   const db = getDb();
@@ -115,15 +150,24 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     throw new Error('Run missing userId/channelId; cannot deliver messages');
   }
 
-  // Update status to running
-  await db.update(runs).set({ status: 'running', updatedAt: new Date() }).where(eq(runs.id, runId));
+  // Update status to running (only if not already running by another worker)
+  const updated = await db
+    .update(runs)
+    .set({ status: 'running', updatedAt: new Date() })
+    .where(and(eq(runs.id, runId), eq(runs.status, 'pending')))
+    .returning({ id: runs.id });
+  if (!updated || updated.length === 0) {
+    logger.warn('Run already claimed by another worker', { runId, status: run.status });
+    return;
+  }
 
   let stepSeq = 0;
   let lastToolError: { tool: string; error?: string } | null = null;
     const repeatedCallCounts = new Map<string, number>();
     const repeatedResultCounts = new Map<string, number>();
   const repeatedSpawnCounts = new Map<string, number>();
-  let blockedSpawnCount = 0;
+    let blockedSpawnCount = 0;
+    let lastSpawnSignature: string | null = null;
 
   try {
     // 2. Load agent plugins
@@ -163,7 +207,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         : null;
 
     const filteredTools = allowedToolSet
-      ? enabledTools.filter((tool) => allowedToolSet.has(tool.name))
+      ? enabledTools.filter((tool) => allowedToolSet.has(tool.name) || tool.name === 'tools')
       : enabledTools;
 
     const patchedTools = filteredTools.map((tool) => {
@@ -231,20 +275,82 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     }
 
     const toolDescriptions = buildToolPrompt(toolRegistry.getAllTools(), run.kind ?? 'coordinator');
+    const agentLevelForPrompt =
+      run.kind === 'subagent' ? ((run.inputJson as any)?.agentLevel ?? 1) : 0;
+    const isCoordinator = run.kind !== 'subagent';
+    const isSubagent = run.kind === 'subagent' && agentLevelForPrompt === 1;
+    const isSubsubagent = run.kind === 'subagent' && agentLevelForPrompt >= 2;
+    const rolePrompt = isCoordinator
+      ? 'ROLE: Coordinator (Project Manager)\n' +
+        '- You do NOT do the real work. You do NOT call tools. You do NOT produce the final output.\n' +
+        '- Your job is to decompose the task, define scopes, and delegate to subagents.\n' +
+        '- Use queue_op to manage tasks. Use spawn_subagent(s) to assign work with precise context and success criteria.\n' +
+        '- When a subagent finishes, review and either deliver_subagent_output or retry_subagent with feedback.\n' +
+        '- Never emit request_parent. If you need more info from subagents, reply_subagent or spawn new ones.\n'
+      : isSubagent
+        ? 'ROLE: Subagent (Worker)\n' +
+          '- You DO the real work. Use tools as needed, including tools.list/tools.describe to find the right tool.\n' +
+          '- You must finish with a concrete output for the coordinator (not the user).\n' +
+          '- If blocked, use request_parent exactly once with a clear, specific question.\n' +
+          '- You may delegate only if the coordinator explicitly allowed it in your inputJson (allowSubagents=true) AND agentLevel<2. Otherwise do not spawn.\n'
+        : 'ROLE: Subsubagent (Executor)\n' +
+          '- You DO the real work and must not delegate.\n' +
+          '- Use tools as needed and finish with a concrete output for the coordinator.\n';
+
+    const examplePrompt = isCoordinator
+      ? 'EXAMPLES (Coordinator):\n' +
+        '1) Build queue\n' +
+        '{"type":"queue_op","action":"set","items":["Fetch February weather for Bremen","Summarize best riding day"]}\n' +
+        '2) Spawn subagents with context\n' +
+        '{"type":"spawn_subagents","subagents":[{"profile":"research","task":"Fetch February weather for Bremen","tools":["weather.get"],"context":[{"role":"user","content":"User request summary: Find best February riding day for motorcycle TÜV in Bremen. Location/time window: Bremen, Germany · 2026-02-01 to 2026-02-28. Tools to use: weather.get. Expected output format: bullet list of top 3 days with conditions and a single best day. Success criteria: pick safest day (low precip, mild temp, low wind)."}],"agentLevel":1}]}\n' +
+        '3) Deliver output\n' +
+        '{"type":"deliver_subagent_output","runId":"<subagent-run-id>"}\n'
+      : isSubagent
+        ? 'EXAMPLES (Subagent):\n' +
+          '1) Use tool\n' +
+          '{"type":"tool_call","name":"weather.get","args":{"location":"Bremen, Germany","startDate":"2026-02-01","endDate":"2026-02-28"}}\n' +
+          '2) Finish with output for coordinator\n' +
+          '{"type":"finish","output":"Best day: 2026-02-12 (dry, mild, low wind). Runner-ups: 2026-02-10, 2026-02-14."}\n' +
+          '3) Ask parent if blocked\n' +
+          '{"type":"request_parent","message":"Weather tool unavailable. Which alternative tool should I use?"}\n'
+        : 'EXAMPLES (Subsubagent):\n' +
+          '{"type":"tool_call","name":"weather.get","args":{"location":"Bremen, Germany","startDate":"2026-02-01","endDate":"2026-02-28"}}\n' +
+          '{"type":"finish","output":"Best day: 2026-02-12 (dry, mild, low wind)."}\n';
 
     const systemPrompt =
       'You are a task agent. You MUST respond with a single JSON object only. ' +
       'No prose, no markdown. The JSON must match one of these shapes:\n' +
       '1) {"type":"tool_call","name":"tool.command","args":{...}}\n' +
       '2) {"type":"send_message","message":"..."}\n' +
-      '3) {"type":"set_output","output":"...","mode":"replace"|"append"}\n' +
-      '4) {"type":"finish","output":"...","mode":"replace"|"append"}\n' +
-      '5) {"type":"decision","content":"...","importance":"low"|"normal"|"high"}\n' +
-      '6) {"type":"note","category":"requirements"|"plan"|"artifact"|"validation","content":"..."}\n' +
-      '7) {"type":"set_run_limits","maxIterations":12,"reason":"..."}\n' +
-      '8) {"type":"spawn_subagent","subagent":{"profile":"...","task":"...","tools":["..."],"context":[...]}}\n' +
-      '9) {"type":"spawn_subagents","subagents":[{"profile":"...","task":"...","tools":["..."],"context":[...]}]}\n' +
-      '10) {"type":"sleep","reason":"...","wakeAt":"ISO-8601","delaySeconds":123,"cron":"*/5 * * * *"}\n' +
+      '3) {"type":"deliver_subagent_output","runId":"..."}\n' +
+      '4) {"type":"request_parent","message":"..."}\n' +
+      '5) {"type":"reply_subagent","runId":"...","message":"..."}\n' +
+      '6) {"type":"retry_subagent","runId":"...","feedback":"..."}\n' +
+      '7) {"type":"queue_op","action":"push"|"shift"|"clear"|"set","items":["..."]}\n' +
+      '8) {"type":"set_output","output":"...","mode":"replace"|"append"}\n' +
+      '9) {"type":"finish","output":"...","mode":"replace"|"append"}\n' +
+      '10) {"type":"decision","content":"...","importance":"low"|"normal"|"high"}\n' +
+      '11) {"type":"note","category":"requirements"|"plan"|"artifact"|"validation","content":"..."}\n' +
+      '12) {"type":"set_run_limits","maxIterations":12,"reason":"..."}\n' +
+      '13) {"type":"spawn_subagent","subagent":{"profile":"...","task":"...","tools":["..."],"context":[...],"agentLevel":1}}\n' +
+      '14) {"type":"spawn_subagents","subagents":[{"profile":"...","task":"...","tools":["..."],"context":[...],"agentLevel":1}]}\n' +
+      '15) {"type":"sleep","reason":"...","wakeAt":"ISO-8601","delaySeconds":123,"cron":"*/5 * * * *"}\n' +
+      'INTERNAL COMMANDS (not tools): tool_call, send_message, deliver_subagent_output, request_parent, reply_subagent, retry_subagent, queue_op, set_output, finish, decision, note, set_run_limits, spawn_subagent(s), sleep.\n' +
+      'ROLE SCOPES:\n' +
+      '- Coordinator: queue_op, spawn_subagent(s), reply_subagent, retry_subagent, deliver_subagent_output, send_message, set_run_limits, decision, note, sleep, finish.\n' +
+      '- Subagent: tool_call, request_parent, finish, set_output, decision, note, set_run_limits, sleep (only when waitingForParent=true).\n' +
+      '- Subsubagent: tool_call, finish, set_output, decision, note, set_run_limits, sleep (only when waitingForParent=true). No spawning.\n' +
+      'COMMAND USAGE EXAMPLES:\n' +
+      '- tool_call: {"type":"tool_call","name":"tools.list","args":{}}\n' +
+      '- send_message: {"type":"send_message","message":"Working on it; waiting for subagent results."}\n' +
+      '- request_parent: {"type":"request_parent","message":"Weather tool missing. Which tool should I use?"}\n' +
+      '- reply_subagent: {"type":"reply_subagent","runId":"<sub-run-id>","message":"Use tools.list then weather.get."}\n' +
+      '- deliver_subagent_output: {"type":"deliver_subagent_output","runId":"<sub-run-id>"}\n' +
+      '- set_output: {"type":"set_output","output":"Draft answer...","mode":"append"}\n' +
+      '- spawn_subagent: {"type":"spawn_subagent","subagent":{"profile":"research","task":"Fetch February weather for Bremen","tools":["weather.get"],"context":[{"role":"user","content":"Location: Bremen, Germany. Dates: 2026-02-01 to 2026-02-28. Output: best day + top 3 days."}],"agentLevel":1}}\n' +
+      '- sleep: {"type":"sleep","delaySeconds":30,"reason":"Waiting for subagent output"}\n' +
+      '- queue_op: {"type":"queue_op","action":"set","items":["Task A","Task B"]}\n' +
+      '- finish: {"type":"finish","output":"<final output for coordinator or user>","mode":"replace"}\n' +
       'DEFAULT: answer directly and finish in a single step when possible. ' +
       'Only use tool_call if it is necessary to answer correctly. ' +
       'Avoid multi-step iteration for simple questions. ' +
@@ -254,8 +360,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       'Do NOT respond with "I cannot" or "I do not have access" without checking tools first. ' +
       'Tool calls must use the full command name (tool.command), not just the tool name. ' +
       'Use send_message only to provide progress updates for long tasks. ' +
-      'Use set_output when assembling a longer response over multiple steps. ' +
-      'Use finish when the task is complete; the output will be sent to the user. ' +
+      'Use set_output when assembling a longer response over multiple steps (subagents/subsubagents only). ' +
+      'Use finish when the task is complete; coordinators may finish only after validating that output meets the requirements they set. ' +
       'Use decision to record brief coordinator reasoning/justifications; it is shown in the coordinator view but not sent to the user. ' +
       'Use note to record requirements, plan, artifacts, and validation summaries; it is shown in the task view. ' +
       'Requirements note must specify the expected output and decision criteria, not restate the task. ' +
@@ -271,7 +377,17 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       'If agentLevel >= 2, you MUST NOT spawn any subagents. ' +
       'Only spawn a subagent when it clearly reduces work or parallelizes distinct tasks; otherwise act directly. ' +
       'Avoid useless delegation; do not spawn a subagent just to ask the user a simple question. ' +
-      'Subagents must NEVER message the user directly; they should finish with output for the coordinator. ' +
+      rolePrompt +
+      examplePrompt +
+      'Coordinator rules: the coordinator MUST NOT call tools. It should delegate to subagents, review their outputs, and then either deliver_subagent_output or finish if it has validated that the output meets the requirements. It may send brief progress updates via send_message, but do not repeat identical messages. ' +
+      'Coordinator must never emit tool_call. If a tool is needed, spawn a subagent or use queue_op to delegate tool usage. If the coordinator finishes, it should be because it has confirmed the output meets the requirements it set. ' +
+      'Subagent rules: subagents must NEVER message the user directly; they should finish with output for the coordinator. Subagents MUST NOT spawn subagents unless explicitly allowed via inputJson.allowSubagents and agentLevel<2. ' +
+      'Use request_parent for a subagent question; the subagent should then wait until the parent replies. Use reply_subagent to answer a subagent. Use retry_subagent to re-run a completed subagent with feedback. ' +
+      'You MUST maintain a task queue in state.queue using queue_op. You can only sleep when the queue is empty and at least one subagent is still running (coordinator) or when waitingForParent is true (subagent). ' +
+      'Planning quality requirement: for coordinators, produce a very detailed plan (at least 5 numbered steps). ' +
+      'The plan must explicitly include: queue_op to build the queue, spawn_subagent(s) with detailed context for each subagent, and deliver_subagent_output. ' +
+      'When spawning subagents, include context that specifies: the user request in brief, the exact location/time window, tool(s) to call, expected output format, and success criteria. ' +
+      'Subagent task must be specific and scoped; include clear expected output in the context so the subagent can finish without asking follow-ups. ' +
       'If a subagent fails, you must decide whether to retry or stop and explain that decision. ' +
       'Do not repeat the same tool call or spawn the same subagent spec more than once. ' +
       'Coordinator runs may spawn subagents and sleep while they work. ' +
@@ -286,6 +402,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       'If you need tools, use tool_call and wait for tool_result in the transcript. ' +
       'Use tools.list to see all tools and short descriptions. ' +
       'Use tools.describe to see full details for a specific tool. ' +
+      'If the payload contains validationFeedback, you MUST address it explicitly in your next action/output. ' +
       'Process tasks using this internal loop, emitting structured notes so the task dialog shows your work:\n' +
       'Step 1: Output specification (what the user should receive). Emit note(category="requirements").\n' +
       'Step 2: Decision criteria and constraints. Emit note(category="requirements").\n' +
@@ -309,10 +426,12 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       artifact: 0,
       validation: 0,
     };
+    let systemNoteCount = 0;
     const systemNoteCache = new Set<string>();
     const appendSystemNoteOnce = (content: string) => {
       if (systemNoteCache.has(content)) return false;
       systemNoteCache.add(content);
+      systemNoteCount += 1;
       transcript.push({ type: 'system_note', content });
       void appendRunStep(db, {
         runId,
@@ -342,6 +461,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     const isTooSimilar = (a: string, b: string, threshold = 0.7) =>
       jaccardSimilarity(a, b) >= threshold;
     const hasNumberedSteps = (text: string) => /(^|\n)\s*\d+\./.test(text);
+    const countNumberedSteps = (text: string) =>
+      (text.match(/(^|\n)\s*\d+\./g) ?? []).length;
     const hasOutputKeyword = (text: string) =>
       /(output|result|return|provide|deliver|include|list|date|day|criteria|format|best)/i.test(
         text
@@ -349,6 +470,59 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     const toolNames = toolRegistry.getAllTools().map((tool) => tool.name);
     const mentionsAnyTool = (text: string) =>
       toolNames.some((name) => name && text.toLowerCase().includes(name.toLowerCase()));
+    const mentionsCoordinatorOps = (text: string) =>
+      /(queue_op|spawn_subagent|spawn_subagents|deliver_subagent_output)/i.test(text);
+    const normalizeContextItems = (
+      context: Array<{ role: 'user' | 'assistant'; content: string }> | unknown
+    ) => {
+      if (!Array.isArray(context)) return [];
+      return context
+        .map((item) => {
+          if (item && typeof item === 'object' && 'role' in item && 'content' in item) {
+            const typed = item as { role?: 'user' | 'assistant'; content?: string };
+            if (typed.role && typeof typed.content === 'string') {
+              return { role: typed.role, content: typed.content };
+            }
+          }
+          if (item && typeof item === 'object') {
+            return { role: 'user' as const, content: JSON.stringify(item) };
+          }
+          return null;
+        })
+        .filter((item): item is { role: 'user' | 'assistant'; content: string } => Boolean(item));
+    };
+    const ensureSubagentContext = (
+      base: Array<{ role: 'user' | 'assistant'; content: string }>,
+      details: {
+        userRequest: string;
+        locationHint?: string;
+        timeWindow?: string;
+        toolName?: string;
+      }
+    ) => {
+      const joined = base.map((item) => item.content).join('\n');
+      const missingOutputFormat = !/expected output format/i.test(joined);
+      const missingSuccess = !/(success criteria|done when|acceptance criteria)/i.test(joined);
+      const missingSummary = !/user request summary/i.test(joined);
+      const additions: string[] = [];
+      if (missingSummary) {
+        additions.push(`User request summary: ${details.userRequest}`);
+      }
+      if (details.locationHint) {
+        additions.push(`Location/time window: ${details.locationHint}${details.timeWindow ? ` · ${details.timeWindow}` : ''}`);
+      }
+      if (details.toolName) {
+        additions.push(`Tools to use: ${details.toolName}`);
+      }
+      if (missingOutputFormat) {
+        additions.push('Expected output format: concise bullet list with dates, weather conditions, and a single recommended day.');
+      }
+      if (missingSuccess) {
+        additions.push('Success criteria: identify the best day with the safest riding conditions and explain why.');
+      }
+      if (additions.length === 0) return base;
+      return base.concat([{ role: 'user' as const, content: additions.join('\n') }]);
+    };
     const hardCap = Math.max(1, config.runMaxIterationsHardCap);
     const minIterations = Math.max(1, config.runMinIterations);
     let runIterationLimit = Math.min(Math.max(minIterations, config.runMaxIterations), hardCap);
@@ -367,6 +541,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     let lastPlanNote = '';
     let requirementsRewriteRequested = false;
     let planRewriteRequested = false;
+    let planRewriteCount = 0;
     let artifactRewriteRequested = false;
     const nudgeCounts = new Map<string, number>();
     let consecutiveNotes = 0;
@@ -383,15 +558,53 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     let lastBudgetDecision: { action: 'extend' | 'finish'; reason: string } | null = null;
     let runtimeWarningSent = false;
     let runLimitsMissingReminders = 0;
+    const autoSpawnedToolCalls = new Set<string>();
+    let autoRecoverySpawned = false;
+    let finishMissingNotesCount = 0;
+    let lastFinishOutput = '';
+    let finishRepeatCount = 0;
+    let finishValidationRetryCount = 0;
 
     const validateOutput = async (candidate: string, reason: string, payload: unknown) => {
       if (!candidate.trim()) {
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: { event: 'validation_result', reason, decision: 'send', feedback: '', retry: false },
+        });
         return { decision: 'send' as const, feedback: '', retry: false };
       }
       if (validationAttempts >= 2) {
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: {
+            event: 'validation_result',
+            reason,
+            decision: 'send',
+            feedback: '',
+            retry: false,
+            error: 'validation_attempts_exceeded',
+          },
+        });
         return { decision: 'send' as const, feedback: '', retry: false };
       }
       if (candidate === lastValidatedOutput) {
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: {
+            event: 'validation_result',
+            reason,
+            decision: 'send',
+            feedback: '',
+            retry: false,
+            error: 'duplicate_output',
+          },
+        });
         return { decision: 'send' as const, feedback: '', retry: false };
       }
       const validationSystemPrompt =
@@ -417,7 +630,20 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           ],
           { temperature: 0 }
         );
-      } catch {
+      } catch (error) {
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: {
+            event: 'validation_result',
+            reason,
+            decision: 'send',
+            feedback: '',
+            retry: false,
+            error: 'validator_call_failed',
+          },
+        });
         return { decision: 'send' as const, feedback: '', retry: false };
       }
       try {
@@ -426,17 +652,73 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           feedback?: string;
           retry?: boolean;
         };
-        const decision = parsed.decision === 'revise' ? 'revise' : 'send';
+        let decision = parsed.decision === 'revise' ? 'revise' : 'send';
         const feedback = typeof parsed.feedback === 'string' ? parsed.feedback.trim() : '';
-        const retry = Boolean(parsed.retry);
+        let retry = Boolean(parsed.retry);
+        if (decision === 'revise' && !feedback) {
+          decision = 'send';
+          retry = false;
+        }
         validationAttempts += 1;
         lastValidatedOutput = candidate;
         lastValidationFeedback = feedback;
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: {
+            event: 'validation_result',
+            reason,
+            decision,
+            feedback,
+            retry,
+            ...(parsed.decision === 'revise' && !feedback ? { error: 'non_actionable_feedback' } : {}),
+          },
+        });
         return { decision, feedback, retry };
       } catch {
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: {
+            event: 'validation_result',
+            reason,
+            decision: 'send',
+            feedback: '',
+            retry: false,
+            error: 'validator_parse_failed',
+          },
+        });
         return { decision: 'send' as const, feedback: '', retry: false };
       }
     };
+    let runState = normalizeRunState((run.inputJson as any)?.state);
+    const persistRunState = async (nextState: RunState) => {
+      const nextInput = mergeRunInputJson(run.inputJson, nextState);
+      await db
+        .update(runs)
+        .set({ inputJson: nextInput, updatedAt: new Date() })
+        .where(eq(runs.id, runId));
+      run.inputJson = nextInput;
+      runState = nextState;
+    };
+
+    const recordBlock = async (reason: string, detail?: string) => {
+      const nextState: RunState = {
+        ...runState,
+        lastBlockReason: reason,
+        lastBlockDetail: detail ?? null,
+      };
+      await persistRunState(nextState);
+      await appendRunStep(db, {
+        runId,
+        seq: stepSeq++,
+        type: 'message',
+        resultJson: { event: 'action_blocked', reason, detail: detail ?? null },
+      });
+    };
+
     const conversation =
       run.kind === 'coordinator'
         ? await loadConversation(db, run.channelId, run.contextId ?? null, undefined)
@@ -462,6 +744,17 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         type: 'finish',
         resultJson: { output: message, reason },
       });
+      if (run.kind === 'coordinator') {
+        await db
+          .update(runs)
+          .set({ status: 'cancelled', updatedAt: new Date() })
+          .where(
+            and(
+              eq(runs.parentRunId, runId),
+              inArray(runs.status, ['pending', 'running', 'waiting'])
+            )
+          );
+      }
       if (run.kind !== 'subagent') {
         await sendRunMessage({
           db,
@@ -480,6 +773,76 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       }
     };
 
+    const spawnRecoverySubagent = async (reason: string) => {
+      if (run.kind !== 'coordinator') return false;
+      if (autoRecoverySpawned || runState.autoRecoverySpawned) return false;
+      autoRecoverySpawned = true;
+      await persistRunState({ ...runState, autoRecoverySpawned: true });
+      const childRunId = randomUUID();
+      const userRequest = (run.inputText ?? '').trim();
+      const toolSummary = toolRegistry
+        .getAllTools()
+        .map((tool) => `${tool.name}: ${tool.commands.map((cmd) => cmd.name).join(', ')}`)
+        .join('; ');
+      const contextBase = ensureSubagentContext([], { userRequest }).concat([
+        {
+          role: 'user',
+          content:
+            `Recovery spawn reason: ${reason}. ` +
+            `Available tools (do not invent names): ${toolSummary || 'none'}. ` +
+            'If a weather tool exists, use its documented command (e.g., weather.get). ' +
+            'If unsure, call tools.list before choosing a tool. If tool calls fail, finish with a limitation statement.',
+        },
+      ]);
+      await db.insert(runs).values({
+        id: childRunId,
+        tenantId,
+        agentId,
+        userId: run.userId,
+        channelId: run.channelId,
+        contextId: run.contextId ?? null,
+        parentRunId: runId,
+        rootRunId: run.rootRunId ?? runId,
+        kind: 'subagent',
+        profile: 'recovery',
+        inputText: `Resolve the user request end-to-end and provide a final answer for delivery.`,
+        inputJson: {
+          profile: 'recovery',
+          context: contextBase,
+          agentLevel: 1,
+          state: { queue: [], inbox: [] },
+          autoRecovery: true,
+        },
+        allowedTools: null,
+        outputText: '',
+        status: 'pending',
+      });
+      await enqueueRun({
+        type: 'run',
+        runId: childRunId,
+        tenantId,
+        agentId,
+      });
+      await appendRunStep(db, {
+        runId,
+        seq: stepSeq++,
+        type: 'message',
+        resultJson: {
+          event: 'auto_recovery_spawn',
+          subagentRunId: childRunId,
+          task: 'Resolve the user request end-to-end and provide a final answer for delivery.',
+          context: contextBase,
+          reason,
+        },
+      });
+      await db
+        .update(runs)
+        .set({ status: 'waiting', updatedAt: new Date() })
+        .where(eq(runs.id, runId));
+      logger.info('Coordinator auto-recovery spawned subagent', { runId, childRunId, reason });
+      return true;
+    };
+
     const forceFinishIfStuck = async (iteration: number, reason: string) => {
       if (actionCount === 0) {
         return false;
@@ -492,6 +855,19 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         !hasToolCalls;
       if (!shouldForce) return false;
 
+      if (run.kind === 'coordinator') {
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: { event: 'note_loop_detected', reason },
+        });
+        if (await spawnRecoverySubagent(`note_loop:${reason}`)) {
+          return true;
+        }
+        await recordBlock('note_loop', 'Coordinator stuck in notes; waiting for recovery.');
+        return true;
+      }
       await finishRun(fallbackMessage, reason);
       logger.info('Run completed after planning stall', { runId, iteration, reason });
       return true;
@@ -516,6 +892,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       const sameCommand = signatures.size <= 1;
 
       if (noToolCalls && sameOutput && sameCommand) {
+        appendSystemNoteOnce(
+          'You are repeating the same action without new data. Change your approach or provide a best-effort finish instead of retrying.'
+        );
         const bestEffort =
           outputSnapshot || 'I need more details or different tools to make progress.';
         const message =
@@ -529,6 +908,20 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     };
 
     for (let iteration = 0; iteration < hardCap; iteration += 1) {
+      const currentStatusRow = await db
+        .select({ status: runs.status })
+        .from(runs)
+        .where(eq(runs.id, runId))
+        .limit(1);
+      const currentStatus = currentStatusRow[0]?.status;
+      if (currentStatus === 'cancelled') {
+        logger.info('Run cancelled; stopping execution', { runId });
+        return;
+      }
+      if (currentStatus === 'completed' || currentStatus === 'failed' || currentStatus === 'waiting') {
+        logger.info('Run no longer active; stopping execution', { runId, status: currentStatus });
+        return;
+      }
       if (Date.now() - runStartMs > config.runMaxRuntimeMs) {
         if (!runtimeWarningSent) {
           runtimeWarningSent = true;
@@ -569,6 +962,12 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
       const subagentResults =
         run.kind === 'coordinator' ? await loadSubagentResults(db, runId) : [];
+      const activeSubagentCount =
+        run.kind === 'coordinator'
+          ? subagentResults.filter(
+              (sub) => sub.status !== 'completed' && sub.status !== 'failed'
+            ).length
+          : 0;
 
       const agentLevel =
         run.kind === 'subagent' ? ((run.inputJson as any)?.agentLevel ?? 1) : 0;
@@ -584,6 +983,12 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         input: run.inputJson ?? null,
         memories,
         agentLevel,
+        state: runState,
+        activeSubagentCount,
+        validationFeedback: lastValidationFeedback || null,
+        lastBlock: runState.lastBlockReason
+          ? { reason: runState.lastBlockReason, detail: runState.lastBlockDetail ?? null }
+          : null,
       };
 
       const messagesForModel: OpenAIMessage[] = [
@@ -667,6 +1072,84 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         throw new Error('LLM returned invalid JSON for run command');
       }
 
+      const maybeAutoRecover = async () => {
+        if (run.kind !== 'coordinator') return false;
+        if (autoRecoverySpawned || runState.autoRecoverySpawned) return false;
+        if (activeSubagentCount > 0) return false;
+        if (systemNoteCount < 3 && planRewriteCount < 2 && blockedSpawnCount < 1) {
+          return false;
+        }
+        autoRecoverySpawned = true;
+        await persistRunState({ ...runState, autoRecoverySpawned: true });
+        const childRunId = randomUUID();
+        const userRequest = (run.inputText ?? '').trim();
+        const toolSummary = toolRegistry
+          .getAllTools()
+          .map((tool) => `${tool.name}: ${tool.commands.map((cmd) => cmd.name).join(', ')}`)
+          .join('; ');
+        const contextBase = ensureSubagentContext([], {
+          userRequest,
+        }).concat([
+          {
+            role: 'user',
+            content:
+              `Available tools (do not invent names): ${toolSummary || 'none'}. ` +
+              'If a weather tool exists, use its documented command (e.g., weather.get). ' +
+              'If unsure, call tools.list before choosing a tool. If tool calls fail, finish with a limitation statement.',
+          },
+        ]);
+        await db.insert(runs).values({
+          id: childRunId,
+          tenantId,
+          agentId,
+          userId: run.userId,
+          channelId: run.channelId,
+          contextId: run.contextId ?? null,
+          parentRunId: runId,
+          rootRunId: run.rootRunId ?? runId,
+          kind: 'subagent',
+          profile: 'recovery',
+          inputText: `Resolve the user request end-to-end and provide a final answer for delivery.`,
+          inputJson: {
+            profile: 'recovery',
+            context: contextBase,
+            agentLevel: 1,
+            state: { queue: [], inbox: [] },
+            autoRecovery: true,
+          },
+          allowedTools: null,
+          outputText: '',
+          status: 'pending',
+        });
+        await enqueueRun({
+          type: 'run',
+          runId: childRunId,
+          tenantId,
+          agentId,
+        });
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: {
+            event: 'auto_recovery_spawn',
+            subagentRunId: childRunId,
+            task: 'Resolve the user request end-to-end and provide a final answer for delivery.',
+            context: contextBase,
+          },
+        });
+        await db
+          .update(runs)
+          .set({ status: 'waiting', updatedAt: new Date() })
+          .where(eq(runs.id, runId));
+        logger.info('Coordinator auto-recovery spawned subagent', { runId, childRunId });
+        return true;
+      };
+
+      if (await maybeAutoRecover()) {
+        return;
+      }
+
       if (
         run.kind === 'coordinator' &&
         noteCounts.plan > 0 &&
@@ -691,6 +1174,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       const requiresRationale =
         command.type === 'tool_call' ||
         command.type === 'send_message' ||
+        command.type === 'deliver_subagent_output' ||
+        command.type === 'request_parent' ||
+        command.type === 'reply_subagent' ||
+        command.type === 'retry_subagent' ||
+        command.type === 'queue_op' ||
         command.type === 'set_output' ||
         command.type === 'finish' ||
         command.type === 'spawn_subagent' ||
@@ -701,10 +1189,24 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         command.type === 'finish' && (budgetExceeded || limitationRequired || runtimeWarningSent);
 
       if (requiresRationale && !rationaleReady && !allowFinishWithoutRationale) {
-        appendSystemNoteOnce(
-          'Before taking any action, emit note(category="artifact") with exactly one sentence explaining why you are doing the next step and what you are thinking about.'
-        );
-        continue;
+        if (
+          (command.type === 'spawn_subagent' || command.type === 'spawn_subagents') &&
+          noteCounts.artifact > 0
+        ) {
+          rationaleReady = true;
+        } else if (command.type === 'request_parent' && run.kind === 'subagent') {
+          rationaleReady = true;
+        } else if (command.type === 'finish' && run.kind === 'subagent') {
+          rationaleReady = true;
+        } else if (command.type === 'tool_call' && run.kind === 'subagent') {
+          rationaleReady = true;
+        } else {
+          appendSystemNoteOnce(
+            'Before taking any action, emit note(category="artifact") with exactly one sentence explaining why you are doing the next step and what you are thinking about.'
+          );
+          await recordBlock('missing_rationale', 'Expected note(category="artifact") before action.');
+          continue;
+        }
       }
 
       if (budgetExceeded && command.type !== 'set_run_limits' && command.type !== 'finish') {
@@ -811,17 +1313,133 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         forceActionNext = false;
         actionViolationCount = 0;
         consecutiveNotes = 0;
-        if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
-          appendSystemNoteOnce(
-            'Before taking actions, emit note(category="requirements") and note(category="plan") summarizing goals, constraints, and plan.'
-          );
-          if (await forceFinishIfStuck(iteration, 'planning_required')) {
-            return;
-          }
-          if (await recordIterationAndCheck('blocked:planning_required', false)) {
+        if (!command.name || typeof command.name !== 'string') {
+          appendSystemNoteOnce('tool_call requires a non-empty "name" string like "tool.command".');
+          if (await recordIterationAndCheck('blocked:tool_call_missing_name', false)) {
             return;
           }
           continue;
+        }
+        if (run.kind === 'coordinator') {
+          const toolCallSignature = stableStringify({
+            name: command.name,
+            args: command.args ?? {},
+          });
+          if (!autoSpawnedToolCalls.has(toolCallSignature)) {
+            autoSpawnedToolCalls.add(toolCallSignature);
+            const childRunId = randomUUID();
+            const userRequest = (run.inputText ?? '').trim();
+            const contextBase = ensureSubagentContext(
+              [{ role: 'user', content: `Tool call requested: ${command.name} ${JSON.stringify(command.args ?? {})}` }],
+              {
+                userRequest,
+                toolName: command.name,
+              }
+            );
+            await db.insert(runs).values({
+              id: childRunId,
+              tenantId,
+              agentId,
+              userId: run.userId,
+              channelId: run.channelId,
+              contextId: run.contextId ?? null,
+              parentRunId: runId,
+              rootRunId: run.rootRunId ?? runId,
+              kind: 'subagent',
+              profile: 'auto_tool',
+              inputText: `Execute tool ${command.name} and summarize results for the coordinator.`,
+              inputJson: {
+                profile: 'auto_tool',
+                context: contextBase,
+                agentLevel: 1,
+                state: { queue: [], inbox: [] },
+                autoSpawnedFrom: 'tool_call',
+              },
+              allowedTools: [command.name],
+              outputText: '',
+              status: 'pending',
+            });
+            await enqueueRun({
+              type: 'run',
+              runId: childRunId,
+              tenantId,
+              agentId,
+            });
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'message',
+              resultJson: {
+                event: 'auto_spawn_from_tool_call',
+                tool: command.name,
+                args: command.args ?? {},
+                runId: childRunId,
+                task: `Execute tool ${command.name} and summarize results for the coordinator.`,
+              },
+            });
+            await db
+              .update(runs)
+              .set({ status: 'waiting', updatedAt: new Date() })
+              .where(eq(runs.id, runId));
+            logger.info('Coordinator auto-spawned subagent from tool_call', {
+              runId,
+              childRunId,
+              tool: command.name,
+            });
+            return;
+          }
+          appendSystemNoteOnce(
+            'Coordinator tool calls are blocked. Delegate tool work to subagents instead.'
+          );
+          if (await recordIterationAndCheck('blocked:coordinator_tool_call', false)) {
+            return;
+          }
+          continue;
+        }
+        if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
+          if (run.kind === 'subagent') {
+            const fallbackRequirements =
+              (run.inputText ?? '').trim() ||
+              'Provide the requested output with best-effort accuracy.';
+            const fallbackPlan = '1. Use available tools to gather required data.\n2. Summarize findings clearly.';
+            if (noteCounts.requirements === 0) {
+              await appendRunStep(db, {
+                runId,
+                seq: stepSeq++,
+                type: 'note',
+                resultJson: { category: 'requirements', content: fallbackRequirements },
+              });
+              transcript.push({
+                type: 'note',
+                category: 'requirements',
+                content: fallbackRequirements,
+              });
+              noteCounts.requirements += 1;
+              lastRequirementsNote = fallbackRequirements;
+            }
+            if (noteCounts.plan === 0) {
+              await appendRunStep(db, {
+                runId,
+                seq: stepSeq++,
+                type: 'note',
+                resultJson: { category: 'plan', content: fallbackPlan },
+              });
+              transcript.push({ type: 'note', category: 'plan', content: fallbackPlan });
+              noteCounts.plan += 1;
+              lastPlanNote = fallbackPlan;
+            }
+          } else {
+            appendSystemNoteOnce(
+              'Before taking actions, emit note(category="requirements") and note(category="plan") summarizing goals, constraints, and plan.'
+            );
+            if (await forceFinishIfStuck(iteration, 'planning_required')) {
+              return;
+            }
+            if (await recordIterationAndCheck('blocked:planning_required', false)) {
+              return;
+            }
+            continue;
+          }
         }
         const toolCall: ToolCall = {
           id: nanoid(),
@@ -941,55 +1559,31 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         consecutiveNotes = 0;
         const message = command.message?.trim();
         if (!message) {
-          throw new Error('send_message requires a non-empty message');
+          appendSystemNoteOnce('send_message requires a non-empty "message".');
+          if (await recordIterationAndCheck('blocked:send_message_missing', false)) {
+            return;
+          }
+          continue;
         }
 
-        if (run.kind === 'subagent') {
-          outputText = message;
-          await appendRunStep(db, {
-            runId,
-            seq: stepSeq++,
-            type: 'assistant_message',
-            resultJson: { message },
-          });
-          await db
-            .update(runs)
-            .set({ outputText: message, status: 'completed', updatedAt: new Date() })
-            .where(eq(runs.id, runId));
-          await appendRunStep(db, {
-            runId,
-            seq: stepSeq++,
-            type: 'finish',
-            resultJson: { output: message, reason: 'subagent_message' },
-          });
-          if (run.parentRunId) {
-            await wakeParentRun(db, run.parentRunId, tenantId, agentId);
+        if (run.kind !== 'coordinator') {
+          appendSystemNoteOnce(
+            'send_message is only valid for coordinators. Subagents should use request_parent (if blocked) or finish with output for the coordinator.'
+          );
+          if (await recordIterationAndCheck('blocked:send_message_non_coordinator', false)) {
+            return;
           }
-          logger.info('Subagent completed via send_message', { runId });
-          return;
+          continue;
         }
 
         if (message === lastAssistantMessage) {
-          const candidate = (outputText || message).trim();
-          const validation = await validateOutput(candidate, 'send_message', userPayload);
-          if (validation.decision === 'revise') {
-            appendSystemNoteOnce(
-              `Validation requested changes: ${validation.feedback || 'Improve clarity and correctness.'}`
-            );
-            await appendRunStep(db, {
-              runId,
-              seq: stepSeq++,
-              type: 'message',
-              resultJson: { event: 'validation_feedback', feedback: validation.feedback, retry: validation.retry },
-            });
-            if (validation.retry) {
-              limitationRequired = false;
-              limitationReason = null;
-            }
-            continue;
+          appendSystemNoteOnce(
+            'Duplicate send_message blocked. Provide a different progress update or wait for subagents.'
+          );
+          if (await recordIterationAndCheck('blocked:duplicate_message', false)) {
+            return;
           }
-          await finishRun(candidate, 'send_message_duplicate');
-          return;
+          continue;
         }
 
         await appendRunStep(db, {
@@ -1053,16 +1647,439 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         continue;
       }
 
+      if (command.type === 'queue_op') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
+        if (run.kind !== 'coordinator') {
+          appendSystemNoteOnce('queue_op is only valid for coordinators.');
+          if (await recordIterationAndCheck('blocked:queue_op_non_coordinator', false)) {
+            return;
+          }
+          continue;
+        }
+        if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
+          appendSystemNoteOnce(
+            'Before updating the queue, emit note(category="requirements") and note(category="plan").'
+          );
+          await recordBlock('missing_requirements_or_plan', 'queue_op requires requirements and plan notes.');
+          if (await forceFinishIfStuck(iteration, 'planning_required')) {
+            return;
+          }
+          if (await recordIterationAndCheck('blocked:planning_required', false)) {
+            return;
+          }
+          continue;
+        }
+
+        const action = command.action;
+        const items = Array.isArray(command.items)
+          ? command.items.filter((item) => typeof item === 'string')
+          : [];
+        let nextQueue = [...runState.queue];
+        if (action === 'push') {
+          nextQueue = nextQueue.concat(items);
+        } else if (action === 'shift') {
+          nextQueue.shift();
+        } else if (action === 'clear') {
+          nextQueue = [];
+        } else if (action === 'set') {
+          nextQueue = items;
+        } else {
+          appendSystemNoteOnce('queue_op requires a valid action.');
+          if (await recordIterationAndCheck('blocked:queue_op_invalid', false)) {
+            return;
+          }
+          continue;
+        }
+
+        const nextState: RunState = { ...runState, queue: nextQueue };
+        await persistRunState(nextState);
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: { event: 'queue_op', action, queueLength: nextQueue.length },
+        });
+        if (await recordIterationAndCheck('queue_op', false)) {
+          return;
+        }
+        continue;
+      }
+
+      if (command.type === 'deliver_subagent_output') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
+        if (run.kind !== 'coordinator') {
+          appendSystemNoteOnce('deliver_subagent_output is only valid for coordinators.');
+          if (await recordIterationAndCheck('blocked:deliver_non_coordinator', false)) {
+            return;
+          }
+          continue;
+        }
+        if (!command.runId || typeof command.runId !== 'string') {
+          appendSystemNoteOnce('deliver_subagent_output requires a valid "runId" string.');
+          if (await recordIterationAndCheck('blocked:deliver_missing_runid', false)) {
+            return;
+          }
+          continue;
+        }
+        if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
+          appendSystemNoteOnce(
+            'Before delivering output, emit note(category="requirements") and note(category="plan").'
+          );
+          await recordBlock('missing_requirements_or_plan', 'deliver_subagent_output requires requirements and plan notes.');
+          if (await forceFinishIfStuck(iteration, 'planning_required')) {
+            return;
+          }
+          if (await recordIterationAndCheck('blocked:planning_required', false)) {
+            return;
+          }
+          continue;
+        }
+        const [child] = await db
+          .select()
+          .from(runs)
+          .where(and(eq(runs.id, command.runId), eq(runs.parentRunId, runId)))
+          .limit(1);
+        if (!child) {
+          appendSystemNoteOnce('Subagent run not found or not a child of this coordinator.');
+          if (await recordIterationAndCheck('blocked:deliver_missing_subagent', false)) {
+            return;
+          }
+          continue;
+        }
+        if (child.status !== 'completed') {
+          appendSystemNoteOnce('Subagent is not completed yet; wait for it to finish before delivering output.');
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'deliver_waiting_for_subagent', subagentRunId: child.id },
+          });
+          const delaySeconds = 30;
+          const wakeAtDate = new Date(Date.now() + delaySeconds * 1000);
+          await db
+            .update(runs)
+            .set({
+              status: 'waiting',
+              wakeAt: wakeAtDate,
+              wakeReason: 'waiting_for_subagent',
+              updatedAt: new Date(),
+            })
+            .where(eq(runs.id, runId));
+          await enqueueRunWake({
+            type: 'run',
+            runId,
+            tenantId,
+            agentId,
+            delaySeconds,
+            reason: 'waiting_for_subagent',
+          });
+          logger.info('Coordinator waiting for subagent completion', {
+            runId,
+            subagentRunId: child.id,
+          });
+          return;
+        }
+        const output = (child.outputText ?? '').trim();
+        if (!output) {
+          appendSystemNoteOnce('Subagent output is empty; retry the subagent or provide feedback.');
+          if (await recordIterationAndCheck('blocked:deliver_empty_output', false)) {
+            return;
+          }
+          continue;
+        }
+        await finishRun(output, 'deliver_subagent_output');
+        return;
+      }
+
+      if (command.type === 'request_parent') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
+        const message = command.message?.trim();
+        if (!message) {
+          appendSystemNoteOnce('request_parent requires a non-empty "message".');
+          if (await recordIterationAndCheck('blocked:request_parent_missing', false)) {
+            return;
+          }
+          continue;
+        }
+        if (run.kind !== 'subagent') {
+          appendSystemNoteOnce(
+            'request_parent is only valid for subagents. Coordinators should reply_subagent, retry_subagent, or spawn new subagents instead.'
+          );
+          if (await recordIterationAndCheck('blocked:request_parent_non_subagent', false)) {
+            return;
+          }
+          continue;
+        }
+        if (runState.lastRequestParentMessage === message) {
+          const nextCount = (runState.requestParentRepeatCount ?? 0) + 1;
+          const updatedState = {
+            ...runState,
+            requestParentRepeatCount: nextCount,
+          };
+          await persistRunState(updatedState);
+          if (nextCount >= 1) {
+            await finishRun(
+              'I already asked the parent for help and did not receive new guidance. ' +
+                'I am stopping to avoid a loop.',
+              'request_parent_repeat'
+            );
+            return;
+          }
+        }
+        await persistRunState({
+          ...runState,
+          lastRequestParentMessage: message,
+          requestParentRepeatCount: 0,
+        });
+        if (!run.parentRunId) {
+          appendSystemNoteOnce('Subagent is missing parentRunId; cannot request parent.');
+          if (await recordIterationAndCheck('blocked:request_parent_no_parent', false)) {
+            return;
+          }
+          continue;
+        }
+        const [parent] = await db
+          .select()
+          .from(runs)
+          .where(eq(runs.id, run.parentRunId))
+          .limit(1);
+        if (!parent) {
+          appendSystemNoteOnce('Parent run not found.');
+          if (await recordIterationAndCheck('blocked:request_parent_missing_parent', false)) {
+            return;
+          }
+          continue;
+        }
+        const parentState = normalizeRunState((parent.inputJson as any)?.state);
+        parentState.inbox.push({
+          fromRunId: runId,
+          message,
+          at: new Date().toISOString(),
+        });
+        const parentInput = mergeRunInputJson(parent.inputJson, parentState);
+        await db
+          .update(runs)
+          .set({ inputJson: parentInput, updatedAt: new Date() })
+          .where(eq(runs.id, parent.id));
+        await wakeParentRun(db, parent.id, tenantId, agentId);
+
+        await persistRunState({ ...runState, waitingForParent: true });
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: { event: 'request_parent', parentRunId: parent.id },
+        });
+        await db
+          .update(runs)
+          .set({
+            status: 'waiting',
+            wakeAt: null,
+            wakeReason: 'waiting_for_parent',
+            updatedAt: new Date(),
+          })
+          .where(eq(runs.id, runId));
+        logger.info('Subagent waiting for parent response', { runId, parentRunId: parent.id });
+        return;
+      }
+
+      if (command.type === 'reply_subagent') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
+        const message = command.message?.trim();
+        if (!message) {
+          appendSystemNoteOnce('reply_subagent requires a non-empty "message".');
+          if (await recordIterationAndCheck('blocked:reply_missing_message', false)) {
+            return;
+          }
+          continue;
+        }
+        if (!command.runId || typeof command.runId !== 'string') {
+          appendSystemNoteOnce('reply_subagent requires a valid "runId" string.');
+          if (await recordIterationAndCheck('blocked:reply_missing_runid', false)) {
+            return;
+          }
+          continue;
+        }
+        if (run.kind !== 'coordinator') {
+          appendSystemNoteOnce('reply_subagent is only valid for coordinators.');
+          if (await recordIterationAndCheck('blocked:reply_non_coordinator', false)) {
+            return;
+          }
+          continue;
+        }
+        const [child] = await db
+          .select()
+          .from(runs)
+          .where(and(eq(runs.id, command.runId), eq(runs.parentRunId, runId)))
+          .limit(1);
+        if (!child) {
+          appendSystemNoteOnce('Subagent run not found or not a child of this coordinator.');
+          if (await recordIterationAndCheck('blocked:reply_missing_subagent', false)) {
+            return;
+          }
+          continue;
+        }
+        const childState = normalizeRunState((child.inputJson as any)?.state);
+        childState.inbox.push({
+          fromRunId: runId,
+          message,
+          at: new Date().toISOString(),
+        });
+        childState.waitingForParent = false;
+        const childInput = mergeRunInputJson(child.inputJson, childState);
+        await db
+          .update(runs)
+          .set({ inputJson: childInput, status: 'pending', updatedAt: new Date() })
+          .where(eq(runs.id, child.id));
+        await enqueueRun({
+          type: 'run',
+          runId: child.id,
+          tenantId,
+          agentId,
+        });
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: { event: 'reply_subagent', subagentRunId: child.id },
+        });
+        if (await recordIterationAndCheck('reply_subagent', false)) {
+          return;
+        }
+        continue;
+      }
+
+      if (command.type === 'retry_subagent') {
+        actionCount += 1;
+        rationaleReady = false;
+        forceActionNext = false;
+        actionViolationCount = 0;
+        consecutiveNotes = 0;
+        if (run.kind !== 'coordinator') {
+          appendSystemNoteOnce('retry_subagent is only valid for coordinators.');
+          if (await recordIterationAndCheck('blocked:retry_non_coordinator', false)) {
+            return;
+          }
+          continue;
+        }
+        if (!command.runId || typeof command.runId !== 'string') {
+          appendSystemNoteOnce('retry_subagent requires a valid "runId" string.');
+          if (await recordIterationAndCheck('blocked:retry_missing_runid', false)) {
+            return;
+          }
+          continue;
+        }
+        const [child] = await db
+          .select()
+          .from(runs)
+          .where(and(eq(runs.id, command.runId), eq(runs.parentRunId, runId)))
+          .limit(1);
+        if (!child) {
+          appendSystemNoteOnce('Subagent run not found or not a child of this coordinator.');
+          if (await recordIterationAndCheck('blocked:retry_missing_subagent', false)) {
+            return;
+          }
+          continue;
+        }
+        const childInput = (child.inputJson as any) ?? {};
+        const baseContext = Array.isArray(childInput.context) ? childInput.context : [];
+        const feedback = command.feedback?.trim() ?? '';
+        const retryContext = [
+          ...baseContext,
+          ...(child.outputText
+            ? [{ role: 'assistant', content: `Previous output: ${child.outputText}` }]
+            : []),
+          ...(feedback ? [{ role: 'user', content: `Feedback: ${feedback}` }] : []),
+        ];
+        const childAgentLevel =
+          typeof childInput.agentLevel === 'number' ? childInput.agentLevel : 1;
+        const retryRunId = randomUUID();
+        await db.insert(runs).values({
+          id: retryRunId,
+          tenantId,
+          agentId,
+          userId: run.userId,
+          channelId: run.channelId,
+          contextId: run.contextId ?? null,
+          parentRunId: runId,
+          rootRunId: run.rootRunId ?? runId,
+          kind: 'subagent',
+          profile: child.profile ?? null,
+          inputText: child.inputText ?? '',
+          inputJson: {
+            profile: child.profile ?? null,
+            context: retryContext,
+            agentLevel: Math.min(2, Math.max(1, childAgentLevel)),
+            state: { queue: [], inbox: [] },
+            retryOf: child.id,
+          },
+          allowedTools: child.allowedTools ?? [],
+          outputText: '',
+          status: 'pending',
+        });
+        await enqueueRun({
+          type: 'run',
+          runId: retryRunId,
+          tenantId,
+          agentId,
+        });
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: { event: 'retry_subagent', subagentRunId: retryRunId, retryOf: child.id },
+        });
+        await db
+          .update(runs)
+          .set({ status: 'waiting', updatedAt: new Date() })
+          .where(eq(runs.id, runId));
+        logger.info('Coordinator waiting for retried subagent', { runId, retryRunId });
+        return;
+      }
+
       if (command.type === 'set_output') {
         actionCount += 1;
         rationaleReady = false;
         forceActionNext = false;
         actionViolationCount = 0;
         consecutiveNotes = 0;
+        if (!command.output || typeof command.output !== 'string') {
+          appendSystemNoteOnce('set_output requires a non-empty "output" string.');
+          if (await recordIterationAndCheck('blocked:set_output_missing', false)) {
+            return;
+          }
+          continue;
+        }
+        if (run.kind === 'coordinator') {
+          appendSystemNoteOnce(
+            'Coordinator must not generate output directly. Use deliver_subagent_output from a completed subagent.'
+          );
+          if (await recordIterationAndCheck('blocked:coordinator_set_output', false)) {
+            return;
+          }
+          continue;
+        }
         if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
           appendSystemNoteOnce(
             'Before producing output, emit note(category="requirements") and note(category="plan").'
           );
+          await recordBlock('missing_requirements_or_plan', 'set_output requires requirements and plan notes.');
           if (await forceFinishIfStuck(iteration, 'planning_required')) {
             return;
           }
@@ -1121,7 +2138,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       if (command.type === 'decision') {
         const content = command.content?.trim();
         if (!content) {
-          throw new Error('decision requires non-empty content');
+          appendSystemNoteOnce('decision requires non-empty "content".');
+          if (await recordIterationAndCheck('blocked:decision_missing', false)) {
+            return;
+          }
+          continue;
         }
         await appendRunStep(db, {
           runId,
@@ -1157,7 +2178,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       if (command.type === 'note') {
         const content = command.content?.trim();
         if (!content) {
-          throw new Error('note requires non-empty content');
+          appendSystemNoteOnce('note requires non-empty "content".');
+          if (await recordIterationAndCheck('blocked:note_missing', false)) {
+            return;
+          }
+          continue;
         }
         consecutiveNotes += 1;
         if (forceActionNext) {
@@ -1169,8 +2194,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
                 nudgeCounts.set(reason, nextCount);
                 const nudge =
                   nextCount === 1
-                    ? 'You already provided the rationale. Your next response must be an action (tool_call, set_output, send_message, finish, spawn, sleep).'
-                    : 'Second reminder: stop emitting notes and take the next action now (tool_call, set_output, send_message, finish, spawn, sleep).';
+                    ? 'You already provided the rationale. Your next response must be an action (tool_call, send_message, deliver_subagent_output, request_parent, reply_subagent, retry_subagent, queue_op, set_output, finish, spawn, sleep).'
+                    : 'Second reminder: stop emitting notes and take the next action now (tool_call, send_message, deliver_subagent_output, request_parent, reply_subagent, retry_subagent, queue_op, set_output, finish, spawn, sleep).';
                 appendSystemNoteOnce(nudge);
               }
             }
@@ -1184,8 +2209,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
               nudgeCounts.set(reason, nextCount);
               const nudge =
                 nextCount === 1
-                  ? 'You already provided the rationale. Your next response must be an action (tool_call, set_output, send_message, finish, spawn, sleep).'
-                  : 'Second reminder: stop emitting notes and take the next action now (tool_call, set_output, send_message, finish, spawn, sleep).';
+                  ? 'You already provided the rationale. Your next response must be an action (tool_call, send_message, deliver_subagent_output, request_parent, reply_subagent, retry_subagent, queue_op, set_output, finish, spawn, sleep).'
+                  : 'Second reminder: stop emitting notes and take the next action now (tool_call, send_message, deliver_subagent_output, request_parent, reply_subagent, retry_subagent, queue_op, set_output, finish, spawn, sleep).';
               appendSystemNoteOnce(nudge);
             }
           }
@@ -1193,7 +2218,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         }
         if (command.category === 'artifact' && rationaleReady) {
           appendSystemNoteOnce(
-            'You already provided the rationale. Take the next action now (tool_call, set_output, finish, spawn, sleep).'
+            'You already provided the rationale. Take the next action now (tool_call, send_message, deliver_subagent_output, request_parent, reply_subagent, retry_subagent, queue_op, set_output, finish, spawn, sleep).'
           );
           continue;
         }
@@ -1222,11 +2247,45 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             : false;
           const missingTools =
             toolNames.length > 0 && taskHintsTools && !mentionsAnyTool(content);
-          if (tooSimilarToTask || tooSimilarToRequirements || !hasNumberedSteps(content) || missingTools) {
+          const stepCount = countNumberedSteps(content);
+          const coordinatorMissingOps =
+            run.kind === 'coordinator' && !mentionsCoordinatorOps(content);
+          const coordinatorTooShort =
+            run.kind === 'coordinator' && stepCount > 0 && stepCount < 5;
+          const coordinatorMissingOutputFormat =
+            run.kind === 'coordinator' && !/(expected output format|output format)/i.test(content);
+          const coordinatorMissingSuccess =
+            run.kind === 'coordinator' &&
+            !/(success criteria|acceptance criteria|done when)/i.test(content);
+          const coordinatorMissingContext =
+            run.kind === 'coordinator' && !/(subagent context|context for subagent)/i.test(content);
+          if (
+            tooSimilarToTask ||
+            tooSimilarToRequirements ||
+            !hasNumberedSteps(content) ||
+            missingTools ||
+            coordinatorMissingOps ||
+            coordinatorTooShort ||
+            coordinatorMissingOutputFormat ||
+            coordinatorMissingSuccess ||
+            coordinatorMissingContext
+          ) {
+            planRewriteCount += 1;
             appendSystemNoteOnce(
-              'Rewrite plan as concrete numbered steps. Name the tools you will call and key parameters (e.g., date ranges).'
+              'Rewrite plan as detailed numbered steps (at least 5 for coordinators). ' +
+                'Name the tools you will call and key parameters (e.g., date ranges). ' +
+                'For coordinators, include queue_op, spawn_subagent(s), and deliver_subagent_output steps, ' +
+                'and explicitly state expected output format and success criteria, plus the subagent context requirements.'
             );
             planRewriteRequested = true;
+            if (planRewriteCount >= 2) {
+              await appendRunStep(db, {
+                runId,
+                seq: stepSeq++,
+                type: 'message',
+                resultJson: { event: 'plan_loop_detected', count: planRewriteCount },
+              });
+            }
             continue;
           }
         }
@@ -1277,7 +2336,87 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         forceActionNext = false;
         actionViolationCount = 0;
         consecutiveNotes = 0;
+        if (run.kind === 'coordinator') {
+          if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
+            finishMissingNotesCount += 1;
+            appendSystemNoteOnce(
+              'Finish blocked: before finishing, you must emit note(category="requirements") and note(category="plan") that define output criteria.'
+            );
+            if (finishMissingNotesCount < 2) {
+              if (await recordIterationAndCheck('blocked:finish_missing_notes', false)) {
+                return;
+              }
+              continue;
+            }
+            const fallbackRequirements =
+              'Deliver a final answer that matches the requested output and meets safety/quality criteria.';
+            const fallbackPlan =
+              '1. Review subagent outputs.\n2. Validate against requirements.\n3. Finish with the best result.';
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'note',
+              resultJson: { category: 'requirements', content: fallbackRequirements },
+            });
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'note',
+              resultJson: { category: 'plan', content: fallbackPlan },
+            });
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'note',
+              resultJson: { category: 'validation', content: 'Coordinator override: proceeding to finish.' },
+            });
+            noteCounts.requirements += 1;
+            noteCounts.plan += 1;
+            noteCounts.validation += 1;
+            lastRequirementsNote = fallbackRequirements;
+            lastPlanNote = fallbackPlan;
+          }
+        }
+        if (run.kind === 'subagent') {
+          if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
+            const fallbackRequirements =
+              (run.inputText ?? '').trim() ||
+              'Provide the requested output with best-effort accuracy.';
+            const fallbackPlan =
+              '1. Use available tools to gather required data.\n2. Summarize findings clearly.';
+            if (noteCounts.requirements === 0) {
+              await appendRunStep(db, {
+                runId,
+                seq: stepSeq++,
+                type: 'note',
+                resultJson: { category: 'requirements', content: fallbackRequirements },
+              });
+              transcript.push({
+                type: 'note',
+                category: 'requirements',
+                content: fallbackRequirements,
+              });
+              noteCounts.requirements += 1;
+              lastRequirementsNote = fallbackRequirements;
+            }
+            if (noteCounts.plan === 0) {
+              await appendRunStep(db, {
+                runId,
+                seq: stepSeq++,
+                type: 'note',
+                resultJson: { category: 'plan', content: fallbackPlan },
+              });
+              transcript.push({ type: 'note', category: 'plan', content: fallbackPlan });
+              noteCounts.plan += 1;
+              lastPlanNote = fallbackPlan;
+            }
+          }
+        }
         if (budgetExceeded && actionCount > 0 && !budgetDecisionLogged && !runtimeWarningSent) {
+          if (run.kind === 'subagent') {
+            // Subagents can finish without a budget decision to avoid loops.
+            budgetDecisionLogged = true;
+          } else {
           appendSystemNoteOnce(
             'Budget reached. Before finishing, emit a decision explaining why stopping now is the right choice.'
           );
@@ -1285,11 +2424,19 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             return;
           }
           continue;
+          }
         }
         if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
           appendSystemNoteOnce(
             'Before finishing, emit note(category="requirements") and note(category="plan").'
           );
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'finish_blocked', reason: 'missing_requirements_or_plan' },
+          });
+          await recordBlock('missing_requirements_or_plan', 'finish requires requirements and plan notes.');
           if (await forceFinishIfStuck(iteration, 'planning_required')) {
             return;
           }
@@ -1310,11 +2457,37 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
         const finalOutput = outputText.trim() || lastAssistantMessage.trim();
         if (!finalOutput) {
-          throw new Error('Finish called without output or prior message');
+          appendSystemNoteOnce('finish requires an "output" or a prior assistant message to finalize.');
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'finish_blocked', reason: 'missing_output' },
+          });
+          if (await recordIterationAndCheck('blocked:finish_missing_output', false)) {
+            return;
+          }
+          continue;
+        }
+        if (finalOutput === lastFinishOutput) {
+          finishRepeatCount += 1;
+        } else {
+          lastFinishOutput = finalOutput;
+          finishRepeatCount = 0;
+        }
+        if (finishRepeatCount >= 2) {
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'finish_repeat_forced', count: finishRepeatCount },
+          });
+          await finishRun(finalOutput, 'finish_repeat_forced');
+          return;
         }
 
         const validation = await validateOutput(finalOutput, 'finish', userPayload);
-        if (validation.decision === 'revise') {
+        if (validation.decision === 'revise' && run.kind !== 'subagent') {
           appendSystemNoteOnce(
             `Validation requested changes: ${validation.feedback || 'Improve clarity and correctness.'}`
           );
@@ -1322,13 +2495,47 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             runId,
             seq: stepSeq++,
             type: 'message',
-            resultJson: { event: 'validation_feedback', feedback: validation.feedback, retry: validation.retry },
+            resultJson: {
+              event: 'validation_feedback',
+              feedback: validation.feedback || 'Improve clarity and correctness.',
+              retry: validation.retry,
+            },
+          });
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: {
+              event: 'finish_blocked',
+              reason: 'validation_revise',
+              feedback: validation.feedback || 'Improve clarity and correctness.',
+              retry: validation.retry,
+            },
           });
           if (validation.retry) {
-            limitationRequired = false;
-            limitationReason = null;
+            finishValidationRetryCount += 1;
+            if (finishValidationRetryCount < 2) {
+              limitationRequired = false;
+              limitationReason = null;
+              continue;
+            }
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'message',
+              resultJson: { event: 'validation_retry_exhausted', count: finishValidationRetryCount },
+            });
+            await finishRun(finalOutput, 'validation_retry_exhausted');
+            return;
           }
-          continue;
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'validation_override_finish' },
+          });
+          await finishRun(finalOutput, 'validation_override');
+          return;
         }
 
         await finishRun(finalOutput, 'finish');
@@ -1341,6 +2548,52 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         forceActionNext = false;
         actionViolationCount = 0;
         consecutiveNotes = 0;
+        if (run.kind === 'coordinator') {
+          if (runState.queue.length > 0) {
+            appendSystemNoteOnce(
+              'Cannot sleep while the coordinator queue is non-empty. Process or shift queue items first.'
+            );
+            if (await recordIterationAndCheck('blocked:sleep_queue_not_empty', false)) {
+              return;
+            }
+            continue;
+          }
+          if (activeSubagentCount < 1) {
+            appendSystemNoteOnce(
+              'Cannot sleep without any running subagents. Spawn subagents or continue processing.'
+            );
+            if (await recordIterationAndCheck('blocked:sleep_no_subagents', false)) {
+              return;
+            }
+            continue;
+          }
+        } else if (run.kind === 'subagent') {
+          if (!runState.waitingForParent) {
+            appendSystemNoteOnce(
+              'Subagents may only sleep when waiting for a parent reply (waitingForParent=true).'
+            );
+            if (await recordIterationAndCheck('blocked:sleep_not_waiting_for_parent', false)) {
+              return;
+            }
+            continue;
+          }
+        }
+        if (!command.wakeAt && typeof command.delaySeconds !== 'number' && !command.cron) {
+          appendSystemNoteOnce('sleep requires wakeAt, delaySeconds, or cron.');
+          if (await recordIterationAndCheck('blocked:sleep_missing_time', false)) {
+            return;
+          }
+          continue;
+        }
+        if (run.kind === 'subagent' && !runState.waitingForParent) {
+          appendSystemNoteOnce(
+            'Subagents may only sleep when waitingForParent=true. Otherwise continue or request_parent.'
+          );
+          if (await recordIterationAndCheck('blocked:sleep_not_waiting', false)) {
+            return;
+          }
+          continue;
+        }
         const wakeAtDate = computeWakeAt(command.wakeAt, command.delaySeconds);
         await appendRunStep(db, {
           runId,
@@ -1396,6 +2649,66 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         forceActionNext = false;
         actionViolationCount = 0;
         consecutiveNotes = 0;
+        const rawSubagents =
+          command.type === 'spawn_subagent' ? [command.subagent] : command.subagents;
+        if (!Array.isArray(rawSubagents) || rawSubagents.length === 0) {
+          appendSystemNoteOnce('spawn_subagent(s) requires at least one subagent spec.');
+          if (await recordIterationAndCheck('blocked:spawn_missing_spec', false)) {
+            return;
+          }
+          continue;
+        }
+        const missingTask = rawSubagents.some(
+          (sub) => !sub || typeof sub.task !== 'string' || !sub.task.trim()
+        );
+        if (missingTask) {
+          appendSystemNoteOnce('Each subagent spec must include a non-empty "task" string.');
+          if (await recordIterationAndCheck('blocked:spawn_missing_task', false)) {
+            return;
+          }
+          continue;
+        }
+        if (run.kind === 'subagent') {
+          const allowSubagents = Boolean((run.inputJson as any)?.allowSubagents);
+          const agentLevel =
+            run.kind === 'subagent' ? ((run.inputJson as any)?.agentLevel ?? 1) : 0;
+          if (!allowSubagents || agentLevel >= 2) {
+            appendSystemNoteOnce(
+              'Subagent spawning blocked: allowSubagents=false or max depth reached. Request the parent instead.'
+            );
+            if (await recordIterationAndCheck('blocked:subagent_spawn_not_allowed', false)) {
+              return;
+            }
+            continue;
+          }
+        }
+        if (runState.queue.length === 0) {
+          const seededQueue = rawSubagents.map((sub) => sub.task).filter(Boolean);
+          if (seededQueue.length > 0) {
+            const nextState: RunState = { ...runState, queue: seededQueue };
+            await persistRunState(nextState);
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'message',
+              resultJson: { event: 'spawn_queue_seeded', count: seededQueue.length },
+            });
+          } else {
+            appendSystemNoteOnce(
+              'Spawn blocked: coordinator must add tasks to state.queue via queue_op before spawning subagents.'
+            );
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'message',
+              resultJson: { event: 'spawn_blocked', reason: 'empty_queue' },
+            });
+            if (await recordIterationAndCheck('blocked:spawn_empty_queue', false)) {
+              return;
+            }
+            continue;
+          }
+        }
         const agentLevel =
           run.kind === 'subagent' ? ((run.inputJson as any)?.agentLevel ?? 1) : 0;
         if (agentLevel >= 2) {
@@ -1414,21 +2727,45 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           );
           continue;
         }
-        const subagents = command.type === 'spawn_subagent' ? [command.subagent] : command.subagents;
+        const subagents = rawSubagents;
+        const spawnAttemptSignature = stableStringify(
+          subagents.map((sub) => ({
+            profile: sub?.profile ?? null,
+            task: sub?.task ?? null,
+            tools: Array.isArray(sub?.tools) ? sub?.tools : [],
+            context: sub?.context ?? [],
+            agentLevel: sub?.agentLevel ?? null,
+          }))
+        );
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: {
+            event: 'spawn_attempt',
+            signature: spawnAttemptSignature,
+            count: subagents.length,
+          },
+        });
         const created: Array<{ runId: string; task: string; profile?: string | null }> = [];
         const specs = subagents.map((sub) => ({
           profile: sub.profile ?? null,
           task: sub.task,
           tools: Array.isArray(sub.tools) ? sub.tools : [],
           context: sub.context ?? [],
+          agentLevel: sub.agentLevel ?? null,
         }));
         let blockedAll = true;
         for (const sub of subagents) {
+          const requestedLevel =
+            typeof sub.agentLevel === 'number' ? Math.floor(sub.agentLevel) : agentLevel + 1;
+          const childAgentLevel = Math.max(agentLevel + 1, Math.min(2, requestedLevel));
           const spawnSignature = `spawn:${stableStringify({
             profile: sub.profile ?? null,
             task: sub.task,
             tools: Array.isArray(sub.tools) ? sub.tools : [],
             context: sub.context ?? [],
+            agentLevel: childAgentLevel,
           })}`;
           const spawnCount = (repeatedSpawnCounts.get(spawnSignature) ?? 0) + 1;
           repeatedSpawnCounts.set(spawnSignature, spawnCount);
@@ -1444,6 +2781,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           blockedAll = false;
           const childRunId = randomUUID();
           const tools = Array.isArray(sub.tools) ? sub.tools : [];
+          const normalizedContext = normalizeContextItems(sub.context ?? []);
+          const enrichedContext = ensureSubagentContext(normalizedContext, {
+            userRequest: (run.inputText ?? '').trim(),
+            toolName: tools.join(', ') || undefined,
+          });
           await db.insert(runs).values({
             id: childRunId,
             tenantId,
@@ -1458,8 +2800,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             inputText: sub.task,
             inputJson: {
               profile: sub.profile ?? null,
-              context: sub.context ?? [],
-              agentLevel: agentLevel + 1,
+              context: enrichedContext,
+              agentLevel: childAgentLevel,
+              state: { queue: [], inbox: [] },
             },
             allowedTools: tools,
             outputText: '',
@@ -1478,6 +2821,12 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
         if (blockedAll) {
           blockedSpawnCount += 1;
+          if (spawnAttemptSignature === lastSpawnSignature) {
+            appendSystemNoteOnce(
+              'Repeated spawn request detected. Modify the task/queue or ask the user for clarification instead of retrying the same spawn.'
+            );
+          }
+          lastSpawnSignature = spawnAttemptSignature;
           const message =
             'I already tried delegating this and it did not help, so I will stop spawning subagents and handle it directly.';
           await appendRunStep(db, {
@@ -1499,34 +2848,38 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
                 resultJson: { output: message, reason: 'repeat_spawn' },
               });
               if (run.parentRunId) {
-                await wakeParentRun(db, run.parentRunId, tenantId, agentId);
+        await wakeParentRun(db, run.parentRunId, tenantId, agentId);
               }
               return;
             }
+            const userMessage =
+              `${message} I need a bit more detail to delegate properly. ` +
+              'Could you clarify the location and dates you want me to check?';
             await sendRunMessage({
               db,
               userId: run.userId,
               channelId: run.channelId,
               contextId: run.contextId ?? null,
-              content: message,
+              content: userMessage,
               logger,
               runId,
               runKind: run.kind ?? 'coordinator',
             });
             await db
               .update(runs)
-              .set({ outputText: message, status: 'completed', updatedAt: new Date() })
+              .set({ outputText: userMessage, status: 'completed', updatedAt: new Date() })
               .where(eq(runs.id, runId));
             await appendRunStep(db, {
               runId,
               seq: stepSeq++,
               type: 'finish',
-              resultJson: { output: message, reason: 'repeat_spawn' },
+              resultJson: { output: userMessage, reason: 'repeat_spawn' },
             });
             return;
           }
           continue;
         }
+        lastSpawnSignature = spawnAttemptSignature;
 
         await appendRunStep(db, {
           runId,
@@ -1538,8 +2891,23 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         if (created.length > 0) {
           await db
             .update(runs)
-            .set({ status: 'waiting', updatedAt: new Date() })
+            .set({ status: 'waiting', wakeAt: new Date(Date.now() + 30000), wakeReason: 'subagent_watchdog', updatedAt: new Date() })
             .where(eq(runs.id, runId));
+          await enqueueRunWake(
+            {
+              type: 'run',
+              runId,
+              tenantId,
+              agentId,
+            },
+            30000
+          );
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'parent_wake_scheduled', delaySeconds: 30 },
+          });
           logger.info('Run waiting for subagents', { runId, count: created.length });
           return;
         }
@@ -1892,6 +3260,11 @@ function parseRunCommand(responseText: string): (RunCommand | SpawnCommand) | nu
       if (
         parsed.type === 'tool_call' ||
         parsed.type === 'send_message' ||
+        parsed.type === 'deliver_subagent_output' ||
+        parsed.type === 'request_parent' ||
+        parsed.type === 'reply_subagent' ||
+        parsed.type === 'retry_subagent' ||
+        parsed.type === 'queue_op' ||
         parsed.type === 'set_output' ||
         parsed.type === 'finish' ||
         parsed.type === 'decision' ||
@@ -1976,6 +3349,67 @@ function truncateForLog(value: unknown, limit = 2000) {
   const text = JSON.stringify(value);
   if (text.length <= limit) return value;
   return `${text.slice(0, limit)}…(truncated)`;
+}
+
+function normalizeRunState(state: unknown): RunState {
+  const fallback: RunState = {
+    queue: [],
+    inbox: [],
+    waitingForParent: false,
+    autoRecoverySpawned: false,
+    lastRequestParentMessage: '',
+    requestParentRepeatCount: 0,
+  };
+  if (!state || typeof state !== 'object') {
+    return fallback;
+  }
+  const record = state as Record<string, unknown>;
+  const queue = Array.isArray(record.queue)
+    ? record.queue.filter((item) => typeof item === 'string')
+    : [];
+  const inbox = Array.isArray(record.inbox)
+    ? record.inbox
+        .filter(
+          (item) =>
+            item &&
+            typeof item === 'object' &&
+            typeof (item as Record<string, unknown>).message === 'string'
+        )
+        .map((item) => {
+          const entry = item as Record<string, unknown>;
+          return {
+            fromRunId: typeof entry.fromRunId === 'string' ? entry.fromRunId : 'unknown',
+            message: String(entry.message ?? ''),
+            at: typeof entry.at === 'string' ? entry.at : new Date().toISOString(),
+          };
+        })
+    : [];
+  const waitingForParent = Boolean(record.waitingForParent);
+  const autoRecoverySpawned = Boolean(record.autoRecoverySpawned);
+  const lastRequestParentMessage =
+    typeof record.lastRequestParentMessage === 'string' ? record.lastRequestParentMessage : '';
+  const requestParentRepeatCount =
+    typeof record.requestParentRepeatCount === 'number' ? record.requestParentRepeatCount : 0;
+  return {
+    queue,
+    inbox,
+    waitingForParent,
+    autoRecoverySpawned,
+    lastRequestParentMessage,
+    requestParentRepeatCount,
+  };
+}
+
+function mergeRunInputJson(
+  inputJson: unknown,
+  state: RunState
+): Record<string, unknown> {
+  const base =
+    inputJson && typeof inputJson === 'object'
+      ? ({ ...(inputJson as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+  base.state = state;
+  return base;
 }
 
 function computeWakeAt(wakeAt?: string, delaySeconds?: number) {
@@ -2097,7 +3531,7 @@ async function wakeParentRun(
     .set({ status: 'pending', wakeAt: null, wakeReason: null, updatedAt: new Date() })
     .where(eq(runs.id, parentRunId));
 
-  await enqueueRun({
+  await enqueueRunWake({
     type: 'run',
     runId: parentRunId,
     tenantId,

@@ -1,7 +1,8 @@
 import { Queue } from 'bullmq';
 import pino from 'pino';
-import { getDb, triggers, contexts } from '@clifford/db';
-import { lte, eq, and, isNull } from 'drizzle-orm';
+import { getDb, triggers, contexts, runs, runSteps } from '@clifford/db';
+import { lte, eq, and, isNull, inArray } from 'drizzle-orm';
+import { randomUUID } from 'crypto';
 import type { WakeJob, MemoryWriteJob } from '@clifford/sdk';
 import { config } from './config.js';
 import cronParser from 'cron-parser';
@@ -94,6 +95,48 @@ async function autoCloseContexts() {
   }
 }
 
+async function wakeWaitingParents() {
+  const db = getDb();
+  const parents = await db
+    .select({
+      id: runs.id,
+      agentId: runs.agentId,
+      tenantId: runs.tenantId,
+    })
+    .from(runs)
+    .where(eq(runs.status, 'waiting'))
+    .limit(200);
+
+  for (const parent of parents) {
+    const children = await db
+      .select({ id: runs.id })
+      .from(runs)
+      .where(
+        and(
+          eq(runs.parentRunId, parent.id),
+          inArray(runs.status, ['completed', 'failed'])
+        )
+      )
+      .limit(1);
+    if (children.length === 0) continue;
+    await wakeQueue.add('wake', {
+      type: 'wake',
+      triggerId: '',
+      tenantId: parent.tenantId,
+      agentId: parent.agentId,
+      runId: parent.id,
+    });
+    await db.insert(runSteps).values({
+      runId: parent.id,
+      seq: Date.now(),
+      type: 'message',
+      resultJson: { event: 'parent_wake_queued', source: 'daemon' },
+      status: 'completed',
+      idempotencyKey: randomUUID(),
+    });
+  }
+}
+
 async function run() {
   logger.info({ intervalMs: config.schedulerIntervalMs }, 'Scheduler started');
 
@@ -112,6 +155,14 @@ async function run() {
       logger.error({ err }, 'Auto-close failed');
     }
   }, config.autoCloseIntervalMs);
+
+  setInterval(async () => {
+    try {
+      await wakeWaitingParents();
+    } catch (err) {
+      logger.error({ err }, 'Wake waiting parents failed');
+    }
+  }, 60_000);
 }
 
 run();

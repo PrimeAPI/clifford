@@ -37,6 +37,7 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [pendingReplyTo, setPendingReplyTo] = useState<string | null>(null);
+  const lastPendingCheckRef = useRef<number>(0);
   const [contexts, setContexts] = useState<ContextItem[]>([]);
   const [activeContextId, setActiveContextId] = useState<string | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
@@ -146,6 +147,25 @@ export default function ChatPage() {
         }
         return prev;
       });
+
+      if (!pendingReplyTo) {
+        const lastInbound = [...nextMessages].reverse().find((msg) => msg.direction === 'inbound');
+        const runId = lastInbound ? extractRunId(lastInbound.metadata) : '';
+        const now = Date.now();
+        if (runId && now - lastPendingCheckRef.current > 2000) {
+          lastPendingCheckRef.current = now;
+          const statusRes = await fetch(`/api/runs/${runId}`, {
+            headers: { 'X-User-Id': userId, 'X-Tenant-Id': '00000000-0000-0000-0000-000000000000' },
+          });
+          if (statusRes.ok) {
+            const runData = await statusRes.json();
+            const status = runData?.run?.status;
+            if (['pending', 'running', 'waiting'].includes(status)) {
+              setPendingReplyTo(lastInbound?.id ?? null);
+            }
+          }
+        }
+      }
 
       if (pendingReplyTo) {
         const hasReply = nextMessages.some((msg: Message) => {

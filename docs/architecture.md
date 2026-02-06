@@ -78,6 +78,11 @@ From `apps/api/src/routes/runs.ts`:
 | --- | --- | --- | --- | --- | --- |
 | `tool_call` | `name`, `args?` | Execute tool call via ToolRegistry. Applies policy. | Yes | `tool_call` + `tool_result` | Only if tool result is later used to send/finish |
 | `send_message` | `message` | Sends a message to user; may also finish run depending on conditions. | Often finishes (see below) | `assistant_message` | Yes |
+| `deliver_subagent_output` | `runId` | Coordinator delivers a completed subagent’s output to the user. | No | `finish` | Yes |
+| `request_parent` | `message` | Subagent sends a question to the coordinator inbox and waits. | No (run waits) | `message` event `request_parent` | No |
+| `reply_subagent` | `runId`, `message` | Coordinator replies to a subagent inbox and re-queues it. | Yes | `message` event `reply_subagent` | No |
+| `retry_subagent` | `runId`, `feedback?` | Coordinator re-runs a completed subagent with feedback context. | No (run waits) | `message` event `retry_subagent` | No |
+| `queue_op` | `action`, `items?` | Mutates the run’s `state.queue` (`push|shift|clear|set`). | Yes | `message` event `queue_op` | No |
 | `set_output` | `output`, `mode?` | Updates `outputText` buffer (`replace`/`append`). | Yes | `output_update` | Not until `finish` |
 | `finish` | `output?`, `mode?` | Finalizes run, sends output to user. | No | `finish` | Yes |
 | `decision` | `content`, `importance?` | Records a decision in run steps. | Yes | `decision` | No |
@@ -98,10 +103,22 @@ then `parseRunCommand` treats it as a `tool_call` with `args` from `args`.
 
 The Run Processor finishes after `send_message` if any of the following are true:
 - It is a **subagent** run (always finishes).
-- The message is identical to the previous assistant message.
+- The message is identical to the previous assistant message (blocked for coordinators).
 - The message is a question (ends in `?` or matches `/bitte|please|could you|can you/i`).
 - There were no tool calls or output updates and no prior output.
 - Any tool has failed during this run (`toolFailureCounts.size > 0`).
+
+## Coordinator/Subagent Orchestration Rules
+
+**Source of truth:** `apps/worker/src/run-processor.ts`
+
+- **Coordinator is orchestration-only:** it must not call tools or generate final output. It delegates work to subagents and returns results via `deliver_subagent_output`.
+- **Subagents do the work:** subagents can call tools and generate output, but they do not message the user directly.
+- **No subagent spawning from subagents:** a subagent must use `request_parent` when it needs the coordinator to delegate more work.
+- **Retry loop:** coordinator can `retry_subagent` with feedback, which creates a new subagent run and waits.
+- **Queue discipline:** runs maintain `state.queue` and an `inbox` in `inputJson.state`.
+  - Coordinators may only `sleep` when `state.queue` is empty **and** at least one subagent is still running.
+  - Subagents may only `sleep` when `state.waitingForParent` is true (set by `request_parent`).
 
 ## Memory, Context, and “RAG”
 
@@ -139,6 +156,8 @@ The run payload for the LLM includes:
 - `memories`: active `memoryItems` for the user (no external retrieval).
 - `transcript`: prior tool calls/results and notes.
 - `subagents`: results from completed subagent runs.
+- `state`: persisted run state (`queue`, `inbox`, `waitingForParent`) from `inputJson.state`.
+- `activeSubagentCount`: number of active (non-completed, non-failed) subagents for coordinators.
 
 **Inference:** The system prompt mentions `memory.search` and `memory.sessions`, but those are **tool calls**; there is no built-in retrieval mechanism in the processor itself.
 

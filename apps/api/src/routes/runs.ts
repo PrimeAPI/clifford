@@ -1,9 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { getDb, runs, runSteps, agents, channels } from '@clifford/db';
-import { eq, desc, sql } from 'drizzle-orm';
+import { getDb, runs, runSteps, agents, channels, messages } from '@clifford/db';
+import { eq, desc, sql, and, inArray } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
-import { enqueueRun } from '../queue.js';
+import { enqueueRun, enqueueDelivery } from '../queue.js';
 
 const createRunSchema = z.object({
   agentId: z.string().uuid(),
@@ -259,5 +259,86 @@ export async function runRoutes(app: FastifyInstance) {
     req.raw.on('close', () => {
       clearInterval(interval);
     });
+  });
+
+  // Cancel a run (and its descendants)
+  app.post<{ Params: { id: string } }>('/api/runs/:id/cancel', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(400).send({ error: 'Missing X-User-Id header' });
+    }
+    const { id } = req.params;
+    const db = getDb();
+    const [run] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
+    if (!run) {
+      return reply.status(404).send({ error: 'Run not found' });
+    }
+    if (run.userId && run.userId !== userId) {
+      return reply.status(403).send({ error: 'Forbidden' });
+    }
+
+    const rootId = run.rootRunId ?? run.id;
+    const now = new Date();
+    await db
+      .update(runs)
+      .set({ status: 'cancelled', updatedAt: now, outputText: 'This task was cancelled.' })
+      .where(and(eq(runs.rootRunId, rootId), inArray(runs.status, ['pending', 'running', 'waiting'])));
+    await db
+      .update(runs)
+      .set({ status: 'cancelled', updatedAt: now, outputText: 'This task was cancelled.' })
+      .where(and(eq(runs.id, rootId), inArray(runs.status, ['pending', 'running', 'waiting'])));
+
+    await db.insert(runSteps).values({
+      runId: run.id,
+      seq: Date.now(),
+      type: 'message',
+      resultJson: { event: 'cancelled', reason: 'user_cancelled' },
+      status: 'completed',
+      idempotencyKey: randomUUID(),
+    });
+
+    const [channel] = await db
+      .select()
+      .from(channels)
+      .where(eq(channels.id, run.channelId))
+      .limit(1);
+    if (channel && run.userId) {
+      const [outbound] = await db
+        .insert(messages)
+        .values({
+          id: randomUUID(),
+          userId: run.userId,
+          channelId: run.channelId,
+          contextId: run.contextId ?? null,
+          content: 'This task was cancelled.',
+          direction: 'outbound',
+          deliveryStatus: channel.type === 'web' ? 'delivered' : 'pending',
+          deliveredAt: channel.type === 'web' ? now : null,
+          metadata: JSON.stringify({
+            source: 'run',
+            runId: run.id,
+            kind: run.kind,
+            cancelled: true,
+          }),
+        })
+        .returning();
+      const outboundId = outbound?.id ?? null;
+      if (channel.type === 'discord' && outboundId) {
+        const configValue = channel.config as { discordUserId?: string } | null;
+        if (configValue?.discordUserId) {
+          await enqueueDelivery({
+            type: 'delivery',
+            provider: 'discord',
+            messageId: outboundId,
+            payload: {
+              discordUserId: configValue.discordUserId,
+              content: 'This task was cancelled.',
+            },
+          });
+        }
+      }
+    }
+
+    return { status: 'cancelled', runId: run.id };
   });
 }

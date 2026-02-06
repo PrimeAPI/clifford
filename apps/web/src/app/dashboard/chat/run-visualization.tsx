@@ -12,12 +12,15 @@ type RunSummary = {
   agentId: string;
   status: string;
   inputText: string;
+  inputJson?: unknown;
   outputText?: string | null;
   kind?: string | null;
   profile?: string | null;
   updatedAt?: string;
   wakeAt?: string | null;
   wakeReason?: string | null;
+  allowedTools?: unknown;
+  contextId?: string | null;
 };
 
 type RunStep = {
@@ -47,6 +50,15 @@ type TaskDialogEntry =
       details: Array<{ key: string; value: string }>;
       raw?: unknown;
     }
+  | {
+      id: string;
+      seq: number;
+      kind: 'spawn_single';
+      label: string;
+      runId: string;
+      detail: string;
+      args?: unknown;
+    }
   | { id: string; seq: number; kind: 'tool_result'; label: string; toolName: string; result?: unknown }
   | {
       id: string;
@@ -66,7 +78,43 @@ type TaskDialogEntry =
     }
   | { id: string; seq: number; kind: 'message'; label: string; detail: string }
   | { id: string; seq: number; kind: 'sleep'; label: string; detail: string }
-  | { id: string; seq: number; kind: 'finish'; label: string; reason?: string | null };
+  | { id: string; seq: number; kind: 'finish'; label: string; reason?: string | null }
+  | { id: string; seq: number; kind: 'output_update'; label: string; output: string; mode: string }
+  | { id: string; seq: number; kind: 'validation_missing'; label: string; detail: string };
+
+type RunStateView = {
+  queue: string[];
+  inbox: Array<{ fromRunId: string; message: string; at: string }>;
+  waitingForParent?: boolean;
+};
+
+function getRunState(inputJson: unknown): RunStateView {
+  if (!inputJson || typeof inputJson !== 'object') {
+    return { queue: [], inbox: [] };
+  }
+  const state = (inputJson as Record<string, unknown>).state;
+  if (!state || typeof state !== 'object') {
+    return { queue: [], inbox: [] };
+  }
+  const record = state as Record<string, unknown>;
+  const queue = Array.isArray(record.queue)
+    ? record.queue.filter((item) => typeof item === 'string')
+    : [];
+  const inbox = Array.isArray(record.inbox)
+    ? record.inbox
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => {
+          const entry = item as Record<string, unknown>;
+          return {
+            fromRunId: typeof entry.fromRunId === 'string' ? entry.fromRunId : 'unknown',
+            message: typeof entry.message === 'string' ? entry.message : '',
+            at: typeof entry.at === 'string' ? entry.at : '',
+          };
+        })
+    : [];
+  const waitingForParent = Boolean(record.waitingForParent);
+  return { queue, inbox, waitingForParent };
+}
 
 function TaskDialog({
   runId,
@@ -79,8 +127,8 @@ function TaskDialog({
 }) {
   const { details, children, loading, reload } = useRunDetails(runId);
   const [showFullOutput, setShowFullOutput] = useState(false);
-  const [showEvents, setShowEvents] = useState(true);
   const [expandedEvents, setExpandedEvents] = useState<Set<string>>(new Set());
+  const stateView = useMemo(() => getRunState(details?.run.inputJson), [details]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -181,7 +229,26 @@ function TaskDialog({
           action?: string;
           maxIterations?: number;
           feedback?: string;
+          queueLength?: number;
+          parentRunId?: string;
+          subagentRunId?: string;
+          retryOf?: string;
+          signature?: string;
+          count?: number;
+          args?: unknown;
+          task?: string;
+          context?: unknown;
         } | null;
+        if (!payload) {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'event',
+            label: 'Message',
+            details: [],
+            raw: payload,
+          });
+        }
         if (payload?.event === 'spawn_subagents') {
           const subagents = Array.isArray(payload.subagents) ? payload.subagents : [];
           const statusById = new Map(children.map((child) => [child.id, child.status]));
@@ -208,6 +275,173 @@ function TaskDialog({
             maxIterations: payload.maxIterations ?? null,
           });
         }
+        if (payload?.event === 'queue_op') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Queue update',
+            detail: `Action: ${payload.action ?? 'unknown'} · Queue length: ${payload.queueLength ?? 'n/a'}`,
+          });
+        }
+        if (payload?.event === 'request_parent') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Requested parent',
+            detail: `Parent run: ${payload.parentRunId ?? 'unknown'}`,
+          });
+        }
+        if (payload?.event === 'reply_subagent') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Replied to subagent',
+            detail: `Subagent run: ${payload.subagentRunId ?? 'unknown'}`,
+          });
+        }
+        if (payload?.event === 'retry_subagent') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Retried subagent',
+            detail: `Subagent run: ${payload.subagentRunId ?? 'unknown'}${payload.retryOf ? ` · Retry of: ${payload.retryOf}` : ''}`,
+          });
+        }
+        if (payload?.event === 'spawn_attempt') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Spawn attempt',
+            detail: `Count: ${payload.count ?? 'n/a'} · Signature: ${payload.signature ? payload.signature.slice(0, 120) : 'n/a'}`,
+          });
+        }
+        if (payload?.event === 'parent_wake_scheduled') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Parent wake scheduled',
+            detail: `Delay: ${payload.delaySeconds ?? 'n/a'}s`,
+          });
+        }
+        if (payload?.event === 'parent_wake_queued') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Parent wake queued',
+            detail: `Source: ${payload.source ?? 'daemon'}`,
+          });
+        }
+        if (payload?.event === 'deliver_waiting_for_subagent') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Waiting for subagent',
+            detail: `Subagent run: ${payload.subagentRunId ?? 'unknown'}`,
+          });
+        }
+        if (payload?.event === 'blocked_finish_waiting') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Finish blocked (waiting)',
+            detail: `Active subagents: ${payload.activeSubagentCount ?? 'n/a'}`,
+          });
+        }
+        if (payload?.event === 'auto_spawn_from_tool_call') {
+          const argsText = payload.args ? JSON.stringify(payload.args) : '';
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'spawn_single',
+            label: 'Auto-spawned from tool call',
+            runId: payload.runId ?? 'unknown',
+            detail: `Tool: ${payload.tool ?? 'unknown'} · Task: ${payload.task ?? 'n/a'}${argsText ? ` · Args: ${argsText}` : ''}`,
+            args: payload.args ?? null,
+          });
+        }
+        if (payload?.event === 'auto_recovery_spawn') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'spawn_single',
+            label: 'Auto-recovery spawn',
+            runId: payload.subagentRunId ?? 'unknown',
+            detail: `Subagent: ${payload.subagentRunId ?? 'unknown'}${payload.task ? ` · Task: ${payload.task}` : ''}`,
+            args: payload.context ?? null,
+          });
+        }
+        if (payload?.event === 'plan_loop_detected') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Plan loop detected',
+            detail: `Count: ${payload.count ?? 'n/a'}`,
+          });
+        }
+        if (payload?.event === 'spawn_queue_seeded') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Queue seeded',
+            detail: `Queue items: ${payload.count ?? 'n/a'}`,
+          });
+        }
+        if (payload?.event === 'spawn_blocked') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Spawn blocked',
+            detail: `Reason: ${payload.reason ?? 'unknown'}`,
+          });
+        }
+        if (payload?.event === 'finish_repeat_forced') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Forced finish',
+            detail: `Repeated finish output: ${payload.count ?? 'n/a'}`,
+          });
+        }
+        if (payload?.event === 'validation_override_finish') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Validation override',
+            detail: 'Finished despite validation feedback (retry not requested).',
+          });
+        }
+        if (payload?.event === 'validation_retry_exhausted') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Validation retries exhausted',
+            detail: `Count: ${payload.count ?? 'n/a'} · Forced finish.`,
+          });
+        }
+        if (payload?.event === 'loop_detected' && (payload as any)?.kind === 'spawn') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Spawn loop detected',
+            detail: `Task: ${(payload as any)?.task ?? 'unknown'}`,
+          });
+        }
         if (payload?.event === 'system_note' && payload.content) {
           items.push({
             id: step.id,
@@ -225,25 +459,108 @@ function TaskDialog({
             detail: payload.feedback ?? 'Validation requested changes.',
           });
         }
-          if (payload?.event === 'sleep') {
-            items.push({
-              id: step.id,
-              seq: step.seq,
-              kind: 'sleep',
-              label: 'Sleep',
-              detail: payload?.reason ?? 'Waiting for wake trigger',
-            });
-          }
-      if (payload?.event && !['spawn_subagents', 'sleep', 'budget_decision', 'system_note', 'validation_feedback'].includes(payload.event)) {
-        items.push({
-          id: step.id,
-          seq: step.seq,
-          kind: 'event',
-          label: `Event · ${payload.event}`,
-          details: formatEventDetails(payload),
-          raw: payload,
-        });
-      }
+        if (payload?.event === 'validation_result') {
+          const detailParts = [
+            `Decision: ${payload.decision ?? 'send'}`,
+            payload.retry !== undefined ? `Retry: ${payload.retry}` : null,
+            payload.feedback ? `Feedback: ${payload.feedback}` : null,
+            payload.error ? `Error: ${payload.error}` : null,
+            payload.reason ? `Reason: ${payload.reason}` : null,
+          ].filter(Boolean);
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Validation result',
+            detail: detailParts.join(' · '),
+          });
+        }
+        if (payload?.event === 'finish_blocked') {
+          const detailParts = [
+            payload.reason ? `Reason: ${payload.reason}` : null,
+            payload.retry !== undefined ? `Retry: ${payload.retry}` : null,
+            payload.feedback ? `Feedback: ${payload.feedback}` : null,
+          ].filter(Boolean);
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Finish blocked',
+            detail: detailParts.join(' · '),
+          });
+        }
+        if (payload?.event === 'action_blocked') {
+          const detailParts = [
+            payload.reason ? `Reason: ${payload.reason}` : null,
+            payload.detail ? `Detail: ${payload.detail}` : null,
+          ].filter(Boolean);
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'message',
+            label: 'Action blocked',
+            detail: detailParts.join(' · '),
+          });
+        }
+        if (payload?.event === 'sleep') {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'sleep',
+            label: 'Sleep',
+            detail: payload?.reason ?? 'Waiting for wake trigger',
+          });
+        }
+        if (
+          payload?.event &&
+          ![
+            'spawn_subagents',
+            'sleep',
+            'budget_decision',
+            'system_note',
+            'validation_feedback',
+            'queue_op',
+            'request_parent',
+            'reply_subagent',
+            'retry_subagent',
+            'spawn_attempt',
+            'spawn_queue_seeded',
+            'spawn_blocked',
+            'finish_repeat_forced',
+            'validation_override_finish',
+            'validation_retry_exhausted',
+            'validation_result',
+            'finish_blocked',
+            'action_blocked',
+            'loop_detected',
+            'auto_spawn_from_tool_call',
+            'auto_recovery_spawn',
+            'plan_loop_detected',
+            'parent_wake_scheduled',
+            'parent_wake_queued',
+            'deliver_waiting_for_subagent',
+            'blocked_finish_waiting',
+          ].includes(payload.event)
+        ) {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'event',
+            label: `Event · ${payload.event}`,
+            details: formatEventDetails(payload),
+            raw: payload,
+          });
+        }
+        if (payload && !payload.event) {
+          items.push({
+            id: step.id,
+            seq: step.seq,
+            kind: 'event',
+            label: 'Message',
+            details: formatEventDetails(payload),
+            raw: payload,
+          });
+        }
       }
 
       if (step.type === 'assistant_message') {
@@ -267,6 +584,44 @@ function TaskDialog({
           kind: 'finish',
           label: 'Finished',
           reason: payload?.reason ?? null,
+        });
+      }
+
+      if (step.type === 'output_update') {
+        const payload = step.resultJson as { output?: string; mode?: string } | null;
+        items.push({
+          id: step.id,
+          seq: step.seq,
+          kind: 'output_update',
+          label: 'Output update',
+          output: payload?.output ?? '',
+          mode: payload?.mode ?? 'replace',
+        });
+      }
+
+      if (step.type === 'validation_missing') {
+        const payload = step.resultJson as { detail?: string } | null;
+        items.push({
+          id: step.id,
+          seq: step.seq,
+          kind: 'validation_missing',
+          label: 'Validation missing',
+          detail: payload?.detail ?? 'Validation note missing.',
+        });
+      }
+
+      if (
+        !['note', 'decision', 'tool_call', 'tool_result', 'message', 'assistant_message', 'finish', 'output_update', 'validation_missing'].includes(
+          step.type
+        )
+      ) {
+        items.push({
+          id: step.id,
+          seq: step.seq,
+          kind: 'event',
+          label: `Step · ${step.type}`,
+          details: formatEventDetails((step.resultJson as Record<string, unknown> | null) ?? {}),
+          raw: step.resultJson,
         });
       }
     });
@@ -333,11 +688,13 @@ function TaskDialog({
     lines.push(`Run Budget: ${runBudget?.maxIterations ?? 'not set'}`);
     lines.push(`Budget Reason: ${runBudget?.reason ?? 'n/a'}`);
     lines.push(`Finish Reason: ${finishReason ?? 'n/a'}`);
+    lines.push(`Queue Length: ${stateView.queue.length}`);
+    lines.push(`Inbox Count: ${stateView.inbox.length}`);
+    lines.push(`Waiting For Parent: ${stateView.waitingForParent ? 'yes' : 'no'}`);
     lines.push('Task');
     lines.push(details.run.inputText);
 
-    const visibleEntries = entries.filter((entry) => showEvents || entry.kind !== 'event');
-    visibleEntries.forEach((entry) => {
+    entries.forEach((entry) => {
       if (entry.kind === 'note') {
         lines.push(entry.category);
         lines.push(entry.content);
@@ -365,6 +722,10 @@ function TaskDialog({
       } else if (entry.kind === 'message') {
         lines.push(entry.label);
         lines.push(entry.detail);
+      } else if (entry.kind === 'spawn_single') {
+        lines.push(entry.label);
+        lines.push(`${entry.detail}`);
+        lines.push(`Run ID: ${entry.runId}`);
       } else if (entry.kind === 'sleep') {
         lines.push(entry.label);
         lines.push(entry.detail);
@@ -377,6 +738,13 @@ function TaskDialog({
           lines.push('json:');
           lines.push(JSON.stringify(entry.raw ?? {}, null, 2));
         }
+      } else if (entry.kind === 'output_update') {
+        lines.push(entry.label);
+        lines.push(`Mode: ${entry.mode}`);
+        lines.push(entry.output);
+      } else if (entry.kind === 'validation_missing') {
+        lines.push(entry.label);
+        lines.push(entry.detail);
       } else if (entry.kind === 'finish') {
         lines.push(entry.label);
         if (entry.reason) lines.push(`Reason: ${entry.reason}`);
@@ -386,6 +754,19 @@ function TaskDialog({
     if (details.run.outputText) {
       lines.push('Output');
       lines.push(details.run.outputText);
+    }
+    if (stateView.queue.length > 0 || stateView.inbox.length > 0) {
+      lines.push('State');
+      if (stateView.queue.length > 0) {
+        lines.push('Queue');
+        stateView.queue.forEach((item) => lines.push(`- ${item}`));
+      }
+      if (stateView.inbox.length > 0) {
+        lines.push('Inbox');
+        stateView.inbox.forEach((item) =>
+          lines.push(`${item.fromRunId}: ${item.message}`)
+        );
+      }
     }
 
     return lines.join('\n');
@@ -399,15 +780,8 @@ function TaskDialog({
   return (
     <div className="space-y-4 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={showEvents}
-              onChange={(event) => setShowEvents(event.target.checked)}
-            />
-            Show events
-          </label>
+        <div className="text-xs text-muted-foreground">
+          All events and steps are shown.
         </div>
         <Button variant="outline" size="sm" onClick={copyTaskText}>
           Copy task history
@@ -431,8 +805,46 @@ function TaskDialog({
           <div>Run Budget: {runBudget?.maxIterations ?? 'not set'}</div>
           <div>Budget Reason: {runBudget?.reason ?? 'n/a'}</div>
           <div>Finish Reason: {finishReason ?? 'n/a'}</div>
+          <div>Queue Length: {stateView.queue.length}</div>
+          <div>Inbox Count: {stateView.inbox.length}</div>
+          <div>Waiting For Parent: {stateView.waitingForParent ? 'yes' : 'no'}</div>
         </div>
       </div>
+      {(stateView.queue.length > 0 || stateView.inbox.length > 0) && (
+        <div className="rounded border border-border p-3">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">State</div>
+          {stateView.queue.length > 0 && (
+            <div className="mt-2">
+              <div className="text-xs text-muted-foreground">Queue</div>
+              <div className="mt-1 space-y-1 text-xs">
+                {stateView.queue.map((item, index) => (
+                  <div key={`${details.run.id}-queue-${index}`} className="rounded border border-border px-2 py-1">
+                    {item}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {stateView.inbox.length > 0 && (
+            <div className="mt-3">
+              <div className="text-xs text-muted-foreground">Inbox</div>
+              <div className="mt-1 space-y-2 text-xs">
+                {stateView.inbox.map((item, index) => (
+                  <div key={`${details.run.id}-inbox-${index}`} className="rounded border border-border px-2 py-2">
+                    <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      {item.fromRunId}
+                    </div>
+                    <div className="mt-1 whitespace-pre-wrap">{item.message}</div>
+                    {item.at ? (
+                      <div className="mt-1 text-[11px] text-muted-foreground">{item.at}</div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       <div className="rounded border border-border p-3">
         <div className="text-[11px] uppercase tracking-wide text-muted-foreground">Task</div>
         <div className="mt-1">{details.run.inputText}</div>
@@ -441,9 +853,7 @@ function TaskDialog({
         {entries.length === 0 ? (
           <div className="text-xs text-muted-foreground">No actions recorded yet.</div>
         ) : (
-          entries
-            .filter((entry) => showEvents || entry.kind !== 'event')
-            .map((entry, index) => {
+          entries.map((entry, index) => {
             if (entry.kind === 'finish' && details.run.outputText) {
               const output = details.run.outputText;
               const preview = output.length > 240 ? `${output.slice(0, 240)}…` : output;
@@ -587,6 +997,34 @@ function TaskDialog({
                 </div>
               );
             }
+            if (entry.kind === 'spawn_single') {
+              return (
+                <div key={entry.id} className="rounded border border-border p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="font-medium">{entry.label}</div>
+                    {entry.runId ? (
+                      <div className="flex items-center gap-2">
+                        {entry.args ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => onOpenTool({ name: 'auto_spawn_tool', args: entry.args })}
+                          >
+                            View args
+                          </Button>
+                        ) : null}
+                        <Button variant="ghost" size="sm" onClick={() => onOpenTask(entry.runId)}>
+                          Open
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">
+                    {entry.detail}
+                  </div>
+                </div>
+              );
+            }
             if (entry.kind === 'event') {
               const isExpanded = expandedEvents.has(entry.id);
               return (
@@ -613,6 +1051,25 @@ function TaskDialog({
                       {JSON.stringify(entry.raw ?? {}, null, 2)}
                     </pre>
                   ) : null}
+                </div>
+              );
+            }
+            if (entry.kind === 'output_update') {
+              return (
+                <div key={entry.id} className="rounded border border-border p-3">
+                  <div className="font-medium">{entry.label}</div>
+                  <div className="mt-1 text-xs text-muted-foreground">Mode: {entry.mode}</div>
+                  <div className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">
+                    {entry.output || '(empty)'}
+                  </div>
+                </div>
+              );
+            }
+            if (entry.kind === 'validation_missing') {
+              return (
+                <div key={entry.id} className="rounded border border-border bg-amber-50/60 p-3 text-amber-900">
+                  <div className="text-[11px] uppercase tracking-wide text-amber-700">{entry.label}</div>
+                  <div className="mt-1 whitespace-pre-wrap">{entry.detail}</div>
                 </div>
               );
             }

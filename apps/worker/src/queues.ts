@@ -36,6 +36,16 @@ export async function enqueueMemoryWrite(job: MemoryWriteJob) {
 
 export async function enqueueRun(job: RunJob, delayMs?: number) {
   await runQueue.add('run', job, {
+    jobId: job.runId,
+    removeOnComplete: 100,
+    removeOnFail: 500,
+    delay: delayMs && delayMs > 0 ? delayMs : undefined,
+  });
+}
+
+export async function enqueueRunWake(job: RunJob, delayMs?: number) {
+  await runQueue.add('run', job, {
+    jobId: `${job.runId}:wake:${Date.now()}`,
     removeOnComplete: 100,
     removeOnFail: 500,
     delay: delayMs && delayMs > 0 ? delayMs : undefined,

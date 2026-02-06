@@ -15,6 +15,7 @@ export const memoryWriteQueue = new Queue<MemoryWriteJob>('clifford-memory-write
 
 export async function enqueueRun(job: RunJob) {
   await runQueue.add('run', job, {
+    jobId: job.runId,
     removeOnComplete: 100,
     removeOnFail: 500,
   });
