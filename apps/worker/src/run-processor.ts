@@ -36,6 +36,7 @@ import { enqueueDelivery, enqueueRun } from './queues.js';
 import { randomUUID } from 'crypto';
 import { ModelRouter, createRoutingConfig, type RoutingConfig } from './model-router.js';
 import { classifyTask, type TaskType } from './task-classifier.js';
+import { encodeUserPayload, buildSystemPromptMarkdown } from '@clifford/toon';
 
 type RunCommand =
   | {
@@ -260,30 +261,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
     const toolDescriptions = buildToolPrompt(toolRegistry.getAllTools(), run.kind ?? 'coordinator');
 
-    const systemPrompt = [
-      'You are a task agent. Reply with a single JSON object only (no prose, no markdown).',
-      'Valid commands:',
-      '1) {"type":"tool_call","name":"tool.command","args":{...}}',
-      '2) {"type":"send_message","message":"..."}',
-      '3) {"type":"set_output","output":"...","mode":"replace"|"append"}',
-      '4) {"type":"finish","output":"...","mode":"replace"|"append"}',
-      '5) {"type":"decision","content":"...","importance":"low"|"normal"|"high"}',
-      '6) {"type":"note","category":"requirements"|"plan"|"artifact"|"validation","content":"..."}',
-      '7) {"type":"set_run_limits","maxIterations":12,"reason":"..."}',
-      '8) {"type":"spawn_subagent","subagent":{"profile":"...","task":"...","tools":["..."],"context":[...]}}',
-      '9) {"type":"spawn_subagents","subagents":[{"profile":"...","task":"...","tools":["..."],"context":[...]}]}',
-      '10) {"type":"sleep","reason":"...","wakeAt":"ISO-8601","delaySeconds":123,"cron":"*/5 * * * *"}',
-      '11) {"type":"recover","reason":"...","action":"retry"|"finish"|"ask_user","message":"..."}',
-      'Rules:',
-      '- Use only the tools and commands listed below.',
-      '- Before any action, emit note(category="requirements") once, then note(category="plan") once.',
-      '- Before each action, emit note(category="artifact") with exactly one sentence rationale.',
-      '- If a tool needs parameters, check memory.search/memory.sessions first when available.',
-      '- For factual or up-to-date claims, use retrieval/search tools if available; otherwise state limitations.',
-      '- If you break format or get stuck, use recover.',
-      '',
-      toolDescriptions,
-    ].join('\n');
+    const systemPrompt = buildSystemPromptMarkdown(toolRegistry.getAllTools(), {
+      runKind: run.kind ?? 'coordinator',
+    });
 
     const transcript: TranscriptEntry[] = [];
     let outputText = run.outputText ?? '';
@@ -678,9 +658,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         agentLevel,
       };
 
+      const userContent = encodeUserPayload(userPayload);
+
       const messagesForModel: OpenAIMessage[] = [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: JSON.stringify(userPayload) },
+        { role: 'user', content: userContent },
       ];
       budgetState.tokensUsed += estimateMessagesTokens(messagesForModel);
       budgetState.timeUsedMs = Date.now() - runStartMs;
@@ -858,24 +840,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         runLimitsSet = true;
       }
 
-      const requiresRationale =
-        command.type === 'tool_call' ||
-        command.type === 'send_message' ||
-        command.type === 'set_output' ||
-        command.type === 'finish' ||
-        command.type === 'spawn_subagent' ||
-        command.type === 'spawn_subagents' ||
-        command.type === 'sleep';
-
-      const allowFinishWithoutRationale =
-        command.type === 'finish' && (budgetExceeded || limitationRequired || runtimeWarningSent);
-
-      if (requiresRationale && !rationaleReady && !allowFinishWithoutRationale) {
-        appendSystemNoteOnce(
-          'Before taking any action, emit note(category="artifact") with exactly one sentence explaining why you are doing the next step and what you are thinking about.'
-        );
-        continue;
-      }
+      // Rationale enforcement removed - let LLM respond directly for simple messages
 
       if (budgetExceeded && command.type !== 'set_run_limits' && command.type !== 'finish') {
         appendSystemNoteOnce(
@@ -903,9 +868,10 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         continue;
       }
 
-      if (limitationRequired && command.type !== 'finish') {
+      // Allow send_message even when limited - agent may need to ask for clarification
+      if (limitationRequired && command.type !== 'finish' && command.type !== 'send_message') {
         appendSystemNoteOnce(
-          `A required tool failed (${limitationReason ?? 'unknown_error'}). You must finish now with a limitation statement and best-effort output.`
+          `A required tool failed (${limitationReason ?? 'unknown_error'}). Either ask the user for missing information with send_message, or finish with a limitation statement.`
         );
         if (await recordIterationAndCheck('blocked:limitation', false)) {
           return;
@@ -1015,18 +981,6 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         forceActionNext = false;
         actionViolationCount = 0;
         consecutiveNotes = 0;
-        if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
-          appendSystemNoteOnce(
-            'Before taking actions, emit note(category="requirements") and note(category="plan") summarizing goals, constraints, and plan.'
-          );
-          if (await forceFinishIfStuck(iteration, 'planning_required')) {
-            return;
-          }
-          if (await recordIterationAndCheck('blocked:planning_required', false)) {
-            return;
-          }
-          continue;
-        }
         const toolCall: ToolCall = {
           id: nanoid(),
           name: command.name,
@@ -1128,7 +1082,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             limitationRequired = true;
             limitationReason = errorText;
             appendSystemNoteOnce(
-              `Tool \"${toolCall.name}\" failed (${errorText}). You must finish now with a limitation statement and best-effort output.`
+              `Tool \"${toolCall.name}\" failed (${errorText}). Ask the user for missing information, try a different approach, or finish with what you have.`
             );
           }
         }
@@ -1276,18 +1230,6 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         forceActionNext = false;
         actionViolationCount = 0;
         consecutiveNotes = 0;
-        if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
-          appendSystemNoteOnce(
-            'Before producing output, emit note(category="requirements") and note(category="plan").'
-          );
-          if (await forceFinishIfStuck(iteration, 'planning_required')) {
-            return;
-          }
-          if (await recordIterationAndCheck('blocked:planning_required', false)) {
-            return;
-          }
-          continue;
-        }
         const nextOutput = applyOutputUpdate(outputText, command.output, command.mode);
         const outputChanged = nextOutput !== outputText;
         outputText = nextOutput;
@@ -1377,113 +1319,15 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         if (!content) {
           throw new Error('note requires non-empty content');
         }
-        consecutiveNotes += 1;
-        if (forceActionNext) {
-          if (command.category !== 'artifact') {
-            const reason = 'post_rationale_note';
-            if (consecutiveNotes >= 3) {
-              const nextCount = (nudgeCounts.get(reason) ?? 0) + 1;
-              if (nextCount <= 2) {
-                nudgeCounts.set(reason, nextCount);
-                const nudge =
-                  nextCount === 1
-                    ? 'You already provided the rationale. Your next response must be an action (tool_call, set_output, send_message, finish, spawn, sleep).'
-                    : 'Second reminder: stop emitting notes and take the next action now (tool_call, set_output, send_message, finish, spawn, sleep).';
-                appendSystemNoteOnce(nudge);
-              }
-            }
-            continue;
-          }
-          actionViolationCount += 1;
-          const reason = 'post_rationale_artifact';
-          if (consecutiveNotes >= 3) {
-            const nextCount = (nudgeCounts.get(reason) ?? 0) + 1;
-            if (nextCount <= 2) {
-              nudgeCounts.set(reason, nextCount);
-              const nudge =
-                nextCount === 1
-                  ? 'You already provided the rationale. Your next response must be an action (tool_call, set_output, send_message, finish, spawn, sleep).'
-                  : 'Second reminder: stop emitting notes and take the next action now (tool_call, set_output, send_message, finish, spawn, sleep).';
-              appendSystemNoteOnce(nudge);
-            }
-          }
-          continue;
-        }
-        if (command.category === 'artifact' && rationaleReady) {
-          appendSystemNoteOnce(
-            'You already provided the rationale. Take the next action now (tool_call, set_output, finish, spawn, sleep).'
-          );
-          continue;
-        }
-        if (command.category === 'requirements' && !requirementsRewriteRequested) {
-          const tooSimilarToTask = run.inputText ? isTooSimilar(content, run.inputText) : false;
-          const tooSimilarToPlan = lastPlanNote && isTooSimilar(content, lastPlanNote);
-          if (tooSimilarToTask || tooSimilarToPlan || !hasOutputKeyword(content)) {
-            appendSystemNoteOnce(
-              'Rewrite requirements as an output specification and decision criteria (what the user will receive), not a restatement of the task.'
-            );
-            requirementsRewriteRequested = true;
-            continue;
-          }
-        }
-        if (command.category === 'plan' && !planRewriteRequested) {
-          const tooSimilarToTask = run.inputText ? isTooSimilar(content, run.inputText) : false;
-          const tooSimilarToRequirements =
-            lastRequirementsNote && isTooSimilar(content, lastRequirementsNote);
-          const taskHintsTools = run.inputText
-            ? /(weather|forecast|wetter|temperature|rain|snow)/i.test(run.inputText)
-            : false;
-          const missingTools = toolNames.length > 0 && taskHintsTools && !mentionsAnyTool(content);
-          if (
-            tooSimilarToTask ||
-            tooSimilarToRequirements ||
-            !hasNumberedSteps(content) ||
-            missingTools
-          ) {
-            appendSystemNoteOnce(
-              'Rewrite plan as concrete numbered steps. Name the tools you will call and key parameters (e.g., date ranges).'
-            );
-            planRewriteRequested = true;
-            continue;
-          }
-        }
-        if (command.category === 'artifact' && !artifactRewriteRequested) {
-          const tooSimilarToRequirements =
-            lastRequirementsNote && isTooSimilar(content, lastRequirementsNote, 0.6);
-          const tooSimilarToPlan = lastPlanNote && isTooSimilar(content, lastPlanNote, 0.6);
-          if (tooSimilarToRequirements || tooSimilarToPlan) {
-            appendSystemNoteOnce(
-              'Rewrite the artifact as a single sentence about the immediate next step you are about to take (do not repeat requirements or plan).'
-            );
-            artifactRewriteRequested = true;
-            continue;
-          }
-        }
+        // Just record the note and continue - no validation or enforcement
         await appendRunStep(db, {
           runId,
           seq: stepSeq++,
-          type: 'note',
-          resultJson: { category: command.category, content },
+          type: 'message',
+          resultJson: { event: 'note', category: command.category, content },
         });
         transcript.push({ type: 'note', category: command.category, content });
-        if (command.category === 'requirements') noteCounts.requirements += 1;
-        if (command.category === 'plan') noteCounts.plan += 1;
-        if (command.category === 'artifact') noteCounts.artifact += 1;
-        if (command.category === 'validation') noteCounts.validation += 1;
-        if (command.category === 'requirements') lastRequirementsNote = content;
-        if (command.category === 'plan') lastPlanNote = content;
-        if (command.category === 'artifact') {
-          rationaleReady = true;
-          forceActionNext = true;
-        }
-        if (await forceFinishIfStuck(iteration, 'note_loop')) {
-          return;
-        }
-        if (command.category !== 'artifact') {
-          if (await recordIterationAndCheck(`note:${command.category}`, false)) {
-            return;
-          }
-        }
+        noteCounts[command.category as keyof typeof noteCounts] += 1;
         continue;
       }
 
@@ -1493,33 +1337,6 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         forceActionNext = false;
         actionViolationCount = 0;
         consecutiveNotes = 0;
-        if (budgetExceeded && actionCount > 0 && !budgetDecisionLogged && !runtimeWarningSent) {
-          appendSystemNoteOnce(
-            'Budget reached. Before finishing, emit a decision explaining why stopping now is the right choice.'
-          );
-          if (await recordIterationAndCheck('blocked:budget_decision', false)) {
-            return;
-          }
-          continue;
-        }
-        if (noteCounts.requirements === 0 || noteCounts.plan === 0) {
-          appendSystemNoteOnce(
-            'Before finishing, emit note(category="requirements") and note(category="plan").'
-          );
-          if (await forceFinishIfStuck(iteration, 'planning_required')) {
-            return;
-          }
-          if (await recordIterationAndCheck('blocked:planning_required', false)) {
-            return;
-          }
-          continue;
-        }
-        if (noteCounts.validation === 0) {
-          transcript.push({
-            type: 'validation_missing',
-            detail: 'finish accepted without validation note',
-          });
-        }
         if (command.output) {
           outputText = applyOutputUpdate(outputText, command.output, command.mode);
         }

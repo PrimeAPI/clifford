@@ -18,6 +18,7 @@
     "@clifford/sandbox": "workspace:*",
     "@clifford/sdk": "workspace:*",
     "@clifford/tools": "workspace:*",
+    "@clifford/toon": "workspace:*",
     "bullmq": "^5.32.2",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.36.4",

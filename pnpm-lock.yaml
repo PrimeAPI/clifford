@@ -234,6 +234,9 @@ importers:
       '@clifford/tools':
         specifier: workspace:*
         version: link:../../packages/tools
+      '@clifford/toon':
+        specifier: workspace:*
+        version: link:../../packages/toon
       bullmq:
         specifier: ^5.32.2
         version: 5.67.2
@@ -360,6 +363,19 @@ importers:
       zod:
         specifier: ^3.24.1
         version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/toon:
+    dependencies:
+      '@clifford/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      '@toon-format/toon':
+        specifier: ^1.0.0
+        version: 1.4.0
     devDependencies:
       typescript:
         specifier: ^5.7.2
@@ -1176,6 +1192,9 @@ packages:
     resolution: {integrity: sha512-w31dd8HOx3k9vPtcQh5QHP9GwKcgbMp87j58qi6xgiBnFFtKEAgCWnDw4qUT8aHwkCp8bKvb/KGKWWHedP0AAg==}
     peerDependencies:
       tailwindcss: '>=3.0.0 || insiders || >=4.0.0-alpha.20 || >=4.0.0-beta.1'
+
+  '@toon-format/toon@1.4.0':
+    resolution: {integrity: sha512-bjdhhIPjnX2oVk+pKy/nD3bwuESDLX/5fwW0TxwpV7Q4PVNkiRSv1S0sPeuy9TI4PfAlulow1HShdmMTnYvoLg==}
 
   '@types/bcryptjs@3.0.0':
     resolution: {integrity: sha512-WRZOuCuaz8UcZZE4R5HXTco2goQSI2XxjGY3hbM/xDvwmqFWd4ivooImsMx65OKM6CtNKbnZ5YL+YwAwK7c1dg==}
@@ -3307,6 +3326,8 @@ snapshots:
     dependencies:
       postcss-selector-parser: 6.0.10
       tailwindcss: 3.4.19(tsx@4.21.0)
+
+  '@toon-format/toon@1.4.0': {}
 
   '@types/bcryptjs@3.0.0':
     dependencies:

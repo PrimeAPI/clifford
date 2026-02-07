@@ -1,0 +1,81 @@
+import type { ToolDef, PromptOptions } from './types.js';
+
+export function buildToolDescriptionsMarkdown(tools: ToolDef[], kind: string): string {
+  if (kind === 'coordinator') {
+    const lines: string[] = [];
+    lines.push('### All Tools');
+    lines.push('');
+    lines.push('| Tool | Description | Commands |');
+    lines.push('|------|-------------|----------|');
+    for (const tool of tools) {
+      const commands = tool.commands.map((cmd) => `\`${tool.name}.${cmd.name}\``).join(', ');
+      lines.push(`| ${tool.name} | ${tool.shortDescription} | ${commands} |`);
+    }
+    return lines.join('\n');
+  }
+
+  const pinned = tools.filter((tool) => tool.pinned);
+  const important = tools.filter((tool) => !tool.pinned && tool.important);
+
+  const lines: string[] = [];
+
+  if (pinned.length > 0) {
+    lines.push('### Pinned Tools');
+    lines.push('');
+    lines.push('| Tool | Commands |');
+    lines.push('|------|----------|');
+    for (const tool of pinned) {
+      const commandNames = tool.commands.map((cmd) => `\`${cmd.name}\``).join(', ') || '(none)';
+      lines.push(`| ${tool.name} | ${commandNames} |`);
+    }
+    lines.push('');
+  }
+
+  if (important.length > 0) {
+    lines.push('### Important Tools');
+    lines.push('');
+    lines.push('| Tool | Description |');
+    lines.push('|------|-------------|');
+    for (const tool of important) {
+      lines.push(`| ${tool.name} | ${tool.shortDescription} |`);
+    }
+    lines.push('');
+  }
+
+  if (lines.length === 0) {
+    lines.push('No tools are pinned or marked important.');
+  }
+
+  return lines.join('\n');
+}
+
+export function buildSystemPromptMarkdown(tools: ToolDef[], options: PromptOptions): string {
+  const toolDescriptions = buildToolDescriptionsMarkdown(tools, options.runKind);
+
+  return `# Assistant
+
+You help users by responding to messages and completing tasks. Reply with a single JSON command.
+
+## Commands
+
+| Command | When to Use |
+|---------|-------------|
+| \`{"type":"send_message","message":"..."}\` | Respond to the user directly |
+| \`{"type":"tool_call","name":"tool.command","args":{...}}\` | Execute a tool |
+| \`{"type":"set_output","output":"...","mode":"replace"}\` | Build up working output |
+| \`{"type":"finish","output":"..."}\` | Complete the task with final output |
+| \`{"type":"spawn_subagent","subagent":{...}}\` | Delegate a subtask to a subagent |
+| \`{"type":"sleep","delaySeconds":N}\` | Pause and resume later |
+
+## Behavior
+
+- **Simple messages** (greetings, questions, chat): Respond directly with \`send_message\`.
+- **Complex tasks**: Use tools as needed, build output with \`set_output\`, then \`finish\`.
+- **Multi-step tasks**: Call tools in sequence. Each tool result comes back before the next call.
+- **Delegation**: Use \`spawn_subagent\` for independent subtasks that can run in parallel.
+
+## Tools
+
+${toolDescriptions}
+`;
+}

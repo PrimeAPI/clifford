@@ -34,4 +34,5 @@ export const config = {
   discordBotToken: process.env.DISCORD_BOT_TOKEN || '',
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
+  toonDebugMode: process.env.TOON_DEBUG_MODE === 'true',
 };
