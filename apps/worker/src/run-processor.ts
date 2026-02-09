@@ -4,8 +4,11 @@ import {
   parseToolCommandName,
   commandSchema,
   commandJsonSchema,
+  formatValidationError,
   type Command,
 } from '@clifford/sdk';
+import { canonicalize, repair } from './action-canonicalizer.js';
+import { ProvenanceTracker } from './provenance-tracker.js';
 import {
   getDb,
   runs,
@@ -19,7 +22,7 @@ import {
   triggers,
   agents,
 } from '@clifford/db';
-import { eq, and, desc, inArray } from 'drizzle-orm';
+import { eq, and, desc, inArray, isNull } from 'drizzle-orm';
 import { PolicyEngine, createBudgetState, type BudgetState } from '@clifford/policy';
 import { ToolRegistry } from './tool-registry.js';
 import { nanoid } from 'nanoid';
@@ -37,6 +40,7 @@ import { randomUUID } from 'crypto';
 import { ModelRouter, createRoutingConfig, type RoutingConfig } from './model-router.js';
 import { classifyTask, type TaskType } from './task-classifier.js';
 import { encodeUserPayload, buildSystemPromptMarkdown } from '@clifford/toon';
+import { decideUserMessageCommit } from './message-commit-gate.js';
 
 type RunCommand =
   | {
@@ -145,6 +149,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
   const repeatedResultCounts = new Map<string, number>();
   const repeatedSpawnCounts = new Map<string, number>();
   let blockedSpawnCount = 0;
+  let hasCommittedUserMessage = false;
+  let committedUserMessageHash: string | null = null;
+  let committedUserMessageNormalized: string | null = null;
 
   try {
     // 2. Load agent plugins
@@ -268,7 +275,6 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     const transcript: TranscriptEntry[] = [];
     let outputText = run.outputText ?? '';
     let lastAssistantMessage = '';
-    let lastAssistantMessageSent = false;
     const toolFailureCounts = new Map<string, number>();
     const noteCounts = {
       requirements: 0,
@@ -289,6 +295,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       });
       return true;
     };
+    const provenanceTracker = new ProvenanceTracker();
+
     const normalizeForSimilarity = (text: string) =>
       text
         .toLowerCase()
@@ -369,12 +377,14 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         'You are an output validator. Return only JSON: ' +
         '{"decision":"send"|"revise","feedback":"...","retry":true|false}. ' +
         'Use "revise" if the output is misleading, incomplete, or violates constraints. ' +
+        'Use "revise" if the output contains numeric claims (ratings, scores, averages) without matching provenance data (no search/fetch for that topic). ' +
         'Use "retry": true only if another attempt is likely to improve the result. ' +
         'If the output is a failure/limitation message, decide whether to retry or send as-is.';
       const validationUserPrompt = JSON.stringify({
         reason,
         output: candidate,
         context: payload,
+        provenance: provenanceTracker.getSummary(),
       });
       let responseText = '';
       try {
@@ -417,8 +427,126 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         ? await loadConversation(db, run.channelId, run.contextId ?? null, undefined)
         : await loadConversation(db, run.channelId, run.contextId ?? null, 40);
 
-    const memories = await loadCoreMemories(db, run.userId);
+    const memories = await loadCoreMemories(
+      db,
+      run.userId,
+      run.inputText,
+      conversation.length > 0
+    );
     const priorSpawnSignatures = await loadPriorSpawnSignatures(db, runId);
+
+    const commitUserVisibleMessage = async (message: string, reason: string) => {
+      if (run.kind === 'subagent') {
+        return { committed: false as const, blockedReason: 'subagent' as const };
+      }
+
+      const commitDecision = decideUserMessageCommit(
+        {
+          hasCommitted: hasCommittedUserMessage,
+          committedHash: committedUserMessageHash,
+          committedNormalized: committedUserMessageNormalized,
+        },
+        message
+      );
+
+      await appendRunStep(db, {
+        runId,
+        seq: stepSeq++,
+        type: 'message',
+        resultJson: {
+          event: 'commit_attempt',
+          reason,
+          hash: commitDecision.hash,
+          normalized: commitDecision.normalized,
+        },
+      });
+
+      if (!commitDecision.allowCommit) {
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: {
+            event: 'commit_blocked',
+            reason: commitDecision.reason,
+            similarity: commitDecision.similarity ?? null,
+            hash: commitDecision.hash,
+          },
+        });
+        logger.info(
+          {
+            runId,
+            reason,
+            blockedReason: commitDecision.reason,
+            similarity: commitDecision.similarity ?? null,
+          },
+          'Blocked user-visible commit'
+        );
+        return { committed: false as const, blockedReason: commitDecision.reason };
+      }
+
+      const sent = await sendRunMessage({
+        db,
+        userId: run.userId ?? '',
+        channelId: run.channelId ?? '',
+        contextId: run.contextId ?? null,
+        content: message,
+        logger,
+        runId,
+        runKind: run.kind ?? 'coordinator',
+      });
+
+      if (!sent) {
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: { event: 'commit_send_failed', reason },
+        });
+        return { committed: false as const, blockedReason: 'send_failed' as const };
+      }
+
+      hasCommittedUserMessage = true;
+      committedUserMessageHash = commitDecision.hash;
+      committedUserMessageNormalized = commitDecision.normalized;
+      lastAssistantMessage = message;
+      transcript.push({ type: 'assistant_message', content: message });
+
+      await appendRunStep(db, {
+        runId,
+        seq: stepSeq++,
+        type: 'assistant_message',
+        resultJson: { message, reason, hash: commitDecision.hash },
+      });
+      await appendRunStep(db, {
+        runId,
+        seq: stepSeq++,
+        type: 'message',
+        resultJson: { event: 'commit_success', reason, hash: commitDecision.hash },
+      });
+
+      return { committed: true as const, blockedReason: null };
+    };
+
+    const finishRun = async (message: string, reason: string) => {
+      await db
+        .update(runs)
+        .set({ outputText: message, status: 'completed', updatedAt: new Date() })
+        .where(eq(runs.id, runId));
+      await appendRunStep(db, {
+        runId,
+        seq: stepSeq++,
+        type: 'finish',
+        resultJson: { output: message, reason },
+      });
+      if (run.kind !== 'subagent') {
+        await commitUserVisibleMessage(message, reason);
+      }
+      logger.info('Run completed', { runId, reason });
+      if (run.parentRunId) {
+        await wakeParentRun(db, run.parentRunId, tenantId, agentId);
+      }
+    };
 
     if (run.wakeReason === 'tool_confirm') {
       const confirmation = await loadToolConfirmation(db, runId);
@@ -488,38 +616,6 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       ? 'Hey! How can I help?'
       : 'Sorry, I got stuck while planning. Could you rephrase or be more specific?';
 
-    const finishRun = async (message: string, reason: string) => {
-      await db
-        .update(runs)
-        .set({ outputText: message, status: 'completed', updatedAt: new Date() })
-        .where(eq(runs.id, runId));
-      await appendRunStep(db, {
-        runId,
-        seq: stepSeq++,
-        type: 'finish',
-        resultJson: { output: message, reason },
-      });
-      const shouldSend =
-        run.kind !== 'subagent' &&
-        !(lastAssistantMessageSent && message.trim() === lastAssistantMessage.trim());
-      if (shouldSend) {
-        await sendRunMessage({
-          db,
-          userId: run.userId,
-          channelId: run.channelId,
-          contextId: run.contextId ?? null,
-          content: message,
-          logger,
-          runId,
-          runKind: run.kind ?? 'coordinator',
-        });
-      }
-      logger.info('Run completed', { runId, reason });
-      if (run.parentRunId) {
-        await wakeParentRun(db, run.parentRunId, tenantId, agentId);
-      }
-    };
-
     const forceFinishIfStuck = async (iteration: number, reason: string) => {
       if (actionCount === 0) {
         return false;
@@ -553,7 +649,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
       const noToolCalls = recentIterations.every((entry) => !entry.hadToolCall);
       const sameOutput = recentIterations.every(
-        (entry) => entry.outputSnapshot === recentIterations[0].outputSnapshot
+        (entry) => entry.outputSnapshot === recentIterations[0]!.outputSnapshot
       );
       const signatures = new Set(recentIterations.map((entry) => entry.commandSignature ?? ''));
       const sameCommand = signatures.size <= 1;
@@ -736,7 +832,14 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
               { runId, iteration, errors: validated.error.issues },
               'Structured output failed Zod validation'
             );
-            command = parseRunCommand(lastResponseText);
+            // Attempt canonicalize + repair before re-prompting
+            const parseResult = parseRunCommand(lastResponseText);
+            command = parseResult.command;
+            if (!command && parseResult.validationError) {
+              appendSystemNoteOnce(
+                `Your last command was invalid: ${parseResult.validationError}. Reply with a corrected JSON command.`
+              );
+            }
           }
         } catch (err) {
           // Fall back to regular parsing if structured output fails
@@ -761,7 +864,13 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
               structured: false,
             },
           });
-          command = parseRunCommand(lastResponseText);
+          const parseResult = parseRunCommand(lastResponseText);
+          command = parseResult.command;
+          if (!command && parseResult.validationError) {
+            appendSystemNoteOnce(
+              `Your last command was invalid: ${parseResult.validationError}. Reply with a corrected JSON command.`
+            );
+          }
         }
       } else {
         // Use traditional JSON parsing with retries
@@ -791,13 +900,21 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
               responseText: lastResponseText,
             },
           });
-          command = parseRunCommand(lastResponseText);
+          const parseResult = parseRunCommand(lastResponseText);
+          command = parseResult.command;
           if (command) {
+            if (parseResult.canonicalized || parseResult.repaired) {
+              logger.info(
+                { runId, iteration, attempt, canonicalized: parseResult.canonicalized, repaired: parseResult.repaired, repairDetails: parseResult.repairDetails },
+                'Command canonicalized/repaired before validation'
+              );
+            }
             break;
           }
-          appendSystemNoteOnce(
-            'Invalid JSON response received. Please reply with a single valid JSON command object only.'
-          );
+          const errorMsg = parseResult.validationError
+            ? `Your last command was invalid: ${parseResult.validationError}. Reply with a corrected JSON command.`
+            : 'Invalid JSON response received. Please reply with a single valid JSON command object only.';
+          appendSystemNoteOnce(errorMsg);
         }
       }
 
@@ -808,17 +925,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           type: 'message',
           resultJson: { error: 'invalid_json', rawResponse: lastResponseText.slice(0, 2000) },
         });
-        await sendRunMessage({
-          db,
-          userId: run.userId,
-          channelId: run.channelId,
-          contextId: run.contextId ?? null,
-          content: 'Sorry, I had trouble understanding that request. Please try again.',
-          logger,
-          runId,
-          runKind: run.kind ?? 'coordinator',
-        });
-        throw new Error('LLM returned invalid JSON for run command');
+        await finishRun(
+          'Sorry, I had trouble understanding that request. Please try again.',
+          'invalid_json'
+        );
+        return;
       }
 
       if (
@@ -897,6 +1008,33 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           const message =
             command.message?.trim() ||
             'I encountered a formatting or planning issue and stopped to avoid a bad answer.';
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'draft_message', source: 'recover_finish', message },
+          });
+          const validation = await validateOutput(message, 'recover_finish', userPayload);
+          if (validation.decision === 'revise') {
+            appendSystemNoteOnce(
+              `Validation requested changes: ${validation.feedback || 'Improve clarity and correctness.'}`
+            );
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'message',
+              resultJson: {
+                event: 'validation_feedback',
+                feedback: validation.feedback,
+                retry: validation.retry,
+              },
+            });
+            if (validation.retry) {
+              limitationRequired = false;
+              limitationReason = null;
+            }
+            continue;
+          }
           await finishRun(message, 'recover_finish');
           return;
         }
@@ -904,6 +1042,33 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           const message =
             command.message?.trim() ||
             'I need clarification before I can proceed. Could you specify the missing details?';
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'draft_message', source: 'recover_ask_user', message },
+          });
+          const validation = await validateOutput(message, 'recover_ask_user', userPayload);
+          if (validation.decision === 'revise') {
+            appendSystemNoteOnce(
+              `Validation requested changes: ${validation.feedback || 'Improve clarity and correctness.'}`
+            );
+            await appendRunStep(db, {
+              runId,
+              seq: stepSeq++,
+              type: 'message',
+              resultJson: {
+                event: 'validation_feedback',
+                feedback: validation.feedback,
+                retry: validation.retry,
+              },
+            });
+            if (validation.retry) {
+              limitationRequired = false;
+              limitationReason = null;
+            }
+            continue;
+          }
           await finishRun(message, 'recover_ask_user');
           return;
         }
@@ -991,30 +1156,21 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         const toolCount = (repeatedCallCounts.get(toolSignature) ?? 0) + 1;
         repeatedCallCounts.set(toolSignature, toolCount);
         if (toolCount > 2) {
-          const message = `Detected repeated tool call loop for "${toolCall.name}". Stopping to avoid infinite retries.`;
           await appendRunStep(db, {
             runId,
             seq: stepSeq++,
             type: 'message',
             resultJson: { event: 'loop_detected', kind: 'tool', name: toolCall.name },
           });
-          await db
-            .update(runs)
-            .set({ outputText: message, status: 'failed', updatedAt: new Date() })
-            .where(eq(runs.id, runId));
-          if (run.kind !== 'subagent') {
-            await sendRunMessage({
-              db,
-              userId: run.userId,
-              channelId: run.channelId,
-              contextId: run.contextId ?? null,
-              content: message,
-              logger,
-              runId,
-              runKind: run.kind ?? 'coordinator',
-            });
+          limitationRequired = true;
+          limitationReason = 'repeated_tool_call_loop';
+          appendSystemNoteOnce(
+            `You already called "${toolCall.name}" with the same arguments repeatedly. Do not call it again. Use existing tool results to answer the user with send_message, or finish with a brief limitation if evidence is insufficient.`
+          );
+          if (await recordIterationAndCheck(`loop_detected:${toolCall.name}`, false)) {
+            return;
           }
-          return;
+          continue;
         }
 
         transcript.push({ type: 'tool_call', name: toolCall.name, args: toolCall.args });
@@ -1055,6 +1211,22 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         repeatedResultCounts.set(toolResultSignature, resultCount);
         if (result.success) {
           progressTick += 1;
+          // Track provenance for web tools
+          const toolBase = toolCall.name.split('.')[0];
+          const toolCmd = toolCall.name.split('.')[1];
+          if (toolBase === 'web') {
+            if (toolCmd === 'search' && typeof toolCall.args.query === 'string') {
+              provenanceTracker.recordSearch(toolCall.args.query);
+            } else if (toolCmd === 'fetch' && typeof toolCall.args.url === 'string') {
+              provenanceTracker.recordFetch(toolCall.args.url);
+            } else if (toolCmd === 'extract' && typeof toolCall.args.url === 'string') {
+              provenanceTracker.recordExtract(
+                toolCall.args.url,
+                String(toolCall.args.extractType ?? 'unknown'),
+                result.result
+              );
+            }
+          }
         }
         if (resultCount >= 2) {
           limitationRequired = true;
@@ -1103,6 +1275,13 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           throw new Error('send_message requires a non-empty message');
         }
 
+        // Check grounding before sending message with numeric claims
+        const groundingNudge = provenanceTracker.checkOutputGrounding(message);
+        if (groundingNudge && run.kind !== 'subagent') {
+          appendSystemNoteOnce(groundingNudge);
+          continue;
+        }
+
         if (run.kind === 'subagent') {
           outputText = message;
           await appendRunStep(db, {
@@ -1111,117 +1290,43 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
             type: 'assistant_message',
             resultJson: { message },
           });
-          await db
-            .update(runs)
-            .set({ outputText: message, status: 'completed', updatedAt: new Date() })
-            .where(eq(runs.id, runId));
-          await appendRunStep(db, {
-            runId,
-            seq: stepSeq++,
-            type: 'finish',
-            resultJson: { output: message, reason: 'subagent_message' },
-          });
-          if (run.parentRunId) {
-            await wakeParentRun(db, run.parentRunId, tenantId, agentId);
-          }
-          logger.info('Subagent completed via send_message', { runId });
+          await finishRun(message, 'subagent_message');
+          logger.info('Subagent completed via send_message draft', { runId });
           return;
         }
 
-        if (message === lastAssistantMessage) {
-          const candidate = (outputText || message).trim();
-          const validation = await validateOutput(candidate, 'send_message', userPayload);
-          if (validation.decision === 'revise') {
-            appendSystemNoteOnce(
-              `Validation requested changes: ${validation.feedback || 'Improve clarity and correctness.'}`
-            );
-            await appendRunStep(db, {
-              runId,
-              seq: stepSeq++,
-              type: 'message',
-              resultJson: {
-                event: 'validation_feedback',
-                feedback: validation.feedback,
-                retry: validation.retry,
-              },
-            });
-            if (validation.retry) {
-              limitationRequired = false;
-              limitationReason = null;
-            }
-            continue;
-          }
-          await finishRun(candidate, 'send_message_duplicate');
-          return;
-        }
-
+        outputText = message;
+        lastAssistantMessage = message;
         await appendRunStep(db, {
           runId,
           seq: stepSeq++,
-          type: 'assistant_message',
-          resultJson: { message },
+          type: 'message',
+          resultJson: { event: 'draft_message', source: 'send_message', message },
         });
-
-        const sent = await sendRunMessage({
-          db,
-          userId: run.userId,
-          channelId: run.channelId,
-          contextId: run.contextId ?? null,
-          content: message,
-          logger,
-          runId,
-          runKind: run.kind ?? 'coordinator',
-        });
-        if (!sent) {
+        const validation = await validateOutput(message, 'send_message', userPayload);
+        if (validation.decision === 'revise') {
+          appendSystemNoteOnce(
+            `Validation requested changes: ${validation.feedback || 'Improve clarity and correctness.'}`
+          );
           await appendRunStep(db, {
             runId,
             seq: stepSeq++,
             type: 'message',
-            resultJson: { event: 'send_message_failed' },
+            resultJson: {
+              event: 'validation_feedback',
+              feedback: validation.feedback,
+              retry: validation.retry,
+            },
           });
-        }
-
-        transcript.push({ type: 'assistant_message', content: message });
-        lastAssistantMessage = message;
-        lastAssistantMessageSent = sent;
-
-        const hasToolCalls = transcriptWindow.some((entry) => entry.type === 'tool_call');
-        const hasOutputUpdates = transcriptWindow.some((entry) => entry.type === 'output_update');
-        const asksUser =
-          message.trim().endsWith('?') || /bitte|please|could you|can you/i.test(message);
-        if (
-          (!hasToolCalls && !hasOutputUpdates && !outputText) ||
-          asksUser ||
-          toolFailureCounts.size > 0
-        ) {
-          const validation = await validateOutput(message, 'send_message', userPayload);
-          if (validation.decision === 'revise') {
-            appendSystemNoteOnce(
-              `Validation requested changes: ${validation.feedback || 'Improve clarity and correctness.'}`
-            );
-            await appendRunStep(db, {
-              runId,
-              seq: stepSeq++,
-              type: 'message',
-              resultJson: {
-                event: 'validation_feedback',
-                feedback: validation.feedback,
-                retry: validation.retry,
-              },
-            });
-            if (validation.retry) {
-              limitationRequired = false;
-              limitationReason = null;
-            }
-            continue;
+          if (validation.retry) {
+            limitationRequired = false;
+            limitationReason = null;
           }
-          await finishRun(message, 'send_message_direct');
-          return;
+          continue;
         }
-        if (await recordIterationAndCheck('send_message', false)) {
-          return;
-        }
-        continue;
+
+        await finishRun(message, 'send_message');
+        return;
       }
 
       if (command.type === 'set_output') {
@@ -1345,6 +1450,13 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         if (!finalOutput) {
           throw new Error('Finish called without output or prior message');
         }
+
+        await appendRunStep(db, {
+          runId,
+          seq: stepSeq++,
+          type: 'message',
+          resultJson: { event: 'draft_message', source: 'finish', message: finalOutput },
+        });
 
         const validation = await validateOutput(finalOutput, 'finish', userPayload);
         if (validation.decision === 'revise') {
@@ -1540,26 +1652,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
               }
               return;
             }
-            await sendRunMessage({
-              db,
-              userId: run.userId,
-              channelId: run.channelId,
-              contextId: run.contextId ?? null,
-              content: message,
-              logger,
-              runId,
-              runKind: run.kind ?? 'coordinator',
-            });
-            await db
-              .update(runs)
-              .set({ outputText: message, status: 'completed', updatedAt: new Date() })
-              .where(eq(runs.id, runId));
-            await appendRunStep(db, {
-              runId,
-              seq: stepSeq++,
-              type: 'finish',
-              resultJson: { output: message, reason: 'repeat_spawn' },
-            });
+            await finishRun(message, 'repeat_spawn');
             return;
           }
           continue;
@@ -1604,26 +1697,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
           const message = fallbackCommand.message?.trim();
           if (message) {
-            await sendRunMessage({
-              db,
-              userId: run.userId,
-              channelId: run.channelId,
-              contextId: run.contextId ?? null,
-              content: message,
-              logger,
-              runId,
-              runKind: run.kind ?? 'coordinator',
-            });
-            await db
-              .update(runs)
-              .set({ outputText: message, status: 'completed', updatedAt: new Date() })
-              .where(eq(runs.id, runId));
-            await appendRunStep(db, {
-              runId,
-              seq: stepSeq++,
-              type: 'finish',
-              resultJson: { output: message, reason: 'subagent_failed' },
-            });
+            await finishRun(message, 'subagent_failed');
             return;
           }
         }
@@ -1642,15 +1716,15 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       .set({ status: 'failed', updatedAt: new Date() })
       .where(eq(runs.id, runId));
 
-    if (run.kind !== 'subagent') {
+    if (run.kind !== 'subagent' && !hasCommittedUserMessage) {
       try {
         const message = lastToolError?.error
           ? `Sorry, something went wrong while handling that request. Error: ${lastToolError.error}`
           : 'Sorry, something went wrong while handling that request.';
         await sendRunMessage({
           db,
-          userId: run.userId,
-          channelId: run.channelId,
+          userId: run.userId ?? '',
+          channelId: run.channelId ?? '',
           contextId: run.contextId ?? null,
           content: message,
           logger,
@@ -1660,6 +1734,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       } catch (sendErr) {
         logger.error({ runId, err: sendErr }, 'Failed to send error message');
       }
+    } else if (run.kind !== 'subagent') {
+      logger.info({ runId }, 'Skipping error message because a user-visible message was already committed');
     }
 
     if (run.parentRunId) {
@@ -1824,6 +1900,35 @@ async function executeToolCall(
     return result;
   }
 
+  // Pre-validate tool arguments before policy check or execution
+  const argsValidation = commandDef.argsSchema.safeParse(toolCall.args);
+  if (!argsValidation.success) {
+    const result: ToolResult = {
+      id: toolCall.id,
+      success: false,
+      error: 'invalid_args',
+      result: {
+        error_code: 'invalid_args',
+        error_message: 'Tool arguments failed pre-validation.',
+        details: argsValidation.error.issues.map((issue) => ({
+          path: issue.path.join('.'),
+          message: issue.message,
+          code: issue.code,
+        })),
+      },
+    };
+    await db.insert(runSteps).values({
+      runId,
+      seq: baseSeq + 1,
+      type: 'tool_result',
+      toolName: toolCall.name,
+      resultJson: result,
+      status: 'failed',
+      idempotencyKey: `${runId}:result:${toolCall.id}`,
+    });
+    return result;
+  }
+
   const decision = await policyEngine.decideToolCall(
     {
       tenantId,
@@ -1832,6 +1937,7 @@ async function executeToolCall(
       commandName,
       args: toolCall.args,
       policyProfile: 'default',
+      runKind: run.kind ?? 'coordinator',
     },
     toolDef,
     budgetState
@@ -1901,8 +2007,8 @@ async function executeToolCall(
     if (run.kind !== 'subagent') {
       await sendRunMessage({
         db,
-        userId: run.userId,
-        channelId: run.channelId,
+        userId: run.userId ?? '',
+        channelId: run.channelId ?? '',
         contextId: run.contextId ?? null,
         content: confirmMessage,
         logger,
@@ -1931,8 +2037,8 @@ async function executeToolCall(
         db,
         logger,
         toolResolver: toolRegistry,
-        userId: run.userId,
-        channelId: run.channelId,
+        userId: run.userId ?? undefined,
+        channelId: run.channelId ?? undefined,
         toolConfig,
       },
       toolCall.args
@@ -1995,7 +2101,23 @@ async function executeToolCall(
   }
 }
 
-function parseRunCommand(responseText: string): (RunCommand | SpawnCommand) | null {
+interface ParseResult {
+  command: (RunCommand | SpawnCommand) | null;
+  validationError: string | null;
+  canonicalized: boolean;
+  repaired: boolean;
+  repairDetails: string[];
+}
+
+function parseRunCommand(responseText: string): ParseResult {
+  const fail = (validationError: string | null = null): ParseResult => ({
+    command: null,
+    validationError,
+    canonicalized: false,
+    repaired: false,
+    repairDetails: [],
+  });
+
   try {
     let raw = responseText.trim();
     let parsed: Record<string, unknown> | null = null;
@@ -2003,63 +2125,54 @@ function parseRunCommand(responseText: string): (RunCommand | SpawnCommand) | nu
       parsed = JSON.parse(raw) as Record<string, unknown>;
     } catch {
       const candidate = extractFirstJsonObject(raw);
-      if (!candidate) return null;
+      if (!candidate) return fail();
       parsed = JSON.parse(candidate) as Record<string, unknown>;
     }
     if (!parsed || typeof parsed !== 'object') {
-      return null;
+      return fail();
     }
 
-    // First, try to validate with Zod schema
-    const schemaResult = commandSchema.safeParse(parsed);
+    // Step 1: Canonicalize the raw object
+    const canonicalized = canonicalize(parsed);
+    const wasCanonicalized = JSON.stringify(canonicalized) !== JSON.stringify(parsed);
+
+    // Step 2: Validate with Zod schema
+    const schemaResult = commandSchema.safeParse(canonicalized);
     if (schemaResult.success) {
-      return schemaResult.data as RunCommand | SpawnCommand;
+      return {
+        command: schemaResult.data as RunCommand | SpawnCommand,
+        validationError: null,
+        canonicalized: wasCanonicalized,
+        repaired: false,
+        repairDetails: [],
+      };
     }
 
-    // Fall back to legacy parsing for backwards compatibility with non-standard formats
-    if (typeof parsed.type === 'string') {
-      if (
-        parsed.type === 'tool_call' ||
-        parsed.type === 'send_message' ||
-        parsed.type === 'set_output' ||
-        parsed.type === 'finish' ||
-        parsed.type === 'decision' ||
-        parsed.type === 'note' ||
-        parsed.type === 'set_run_limits' ||
-        parsed.type === 'spawn_subagent' ||
-        parsed.type === 'spawn_subagents' ||
-        parsed.type === 'sleep' ||
-        parsed.type === 'recover'
-      ) {
-        return parsed as RunCommand | SpawnCommand;
-      }
-
-      // Handle shorthand tool call format: {"type": "tool.command", "args": {...}}
-      const toolName = parseToolCommandName(parsed.type);
-      if (toolName) {
+    // Step 3: Attempt repair
+    const repairResult = repair(canonicalized, schemaResult.error);
+    if (repairResult) {
+      const revalidated = commandSchema.safeParse(repairResult.repaired);
+      if (revalidated.success) {
         return {
-          type: 'tool_call',
-          name: parsed.type,
-          args: (parsed.args as Record<string, unknown>) ?? {},
+          command: revalidated.data as RunCommand | SpawnCommand,
+          validationError: null,
+          canonicalized: wasCanonicalized,
+          repaired: true,
+          repairDetails: repairResult.applied,
         };
       }
     }
 
-    // Handle alternative tool call format: {"name": "tool.command", "args": {...}}
-    if (typeof parsed.name === 'string') {
-      const toolName = parseToolCommandName(parsed.name);
-      if (toolName) {
-        return {
-          type: 'tool_call',
-          name: parsed.name,
-          args: (parsed.args as Record<string, unknown>) ?? {},
-        };
-      }
-    }
-
-    return null;
+    // Step 4: Return validation error for re-prompting
+    return {
+      command: null,
+      validationError: formatValidationError(schemaResult.error),
+      canonicalized: wasCanonicalized,
+      repaired: false,
+      repairDetails: [],
+    };
   } catch {
-    return null;
+    return fail();
   }
 }
 
@@ -2084,7 +2197,7 @@ function trimTranscript(transcript: TranscriptEntry[], maxEntries: number, maxTo
   let totalTokens = 0;
   const result: TranscriptEntry[] = [];
   for (let i = limited.length - 1; i >= 0; i -= 1) {
-    const entry = limited[i];
+    const entry = limited[i]!;
     const tokens = estimateTokens(entry);
     if (totalTokens + tokens > maxTokens) {
       break;
@@ -2124,14 +2237,36 @@ function computeWakeAt(wakeAt?: string, delaySeconds?: number) {
   return null;
 }
 
-async function loadCoreMemories(db: ReturnType<typeof getDb>, userId: string) {
+const WEB_QA_PATTERN = /^(what|how|who|where|when|search|find|look\s*up|average|rating|score|imdb|bewertung|durchschnitt)/i;
+
+async function loadCoreMemories(
+  db: ReturnType<typeof getDb>,
+  userId: string,
+  taskText?: string,
+  hasConversation?: boolean
+) {
+  // Skip memories for pure web Q&A tasks (no conversation context)
+  if (
+    config.memorySkipForWebQA &&
+    !hasConversation &&
+    taskText &&
+    WEB_QA_PATTERN.test(taskText.trim())
+  ) {
+    return [];
+  }
+
   const rows = await db
     .select()
     .from(memoryItems)
     .where(and(eq(memoryItems.userId, userId), eq(memoryItems.archived, false)));
 
-  const byLevel = new Map<number, typeof rows>();
-  for (const item of rows) {
+  // Filter by confidence threshold (pinned items bypass threshold)
+  const filtered = rows.filter(
+    (item) => item.pinned || (item.confidence ?? 1) >= config.memoryMinConfidence
+  );
+
+  const byLevel = new Map<number, typeof filtered>();
+  for (const item of filtered) {
     const list = byLevel.get(item.level) ?? [];
     list.push(item);
     byLevel.set(item.level, list);
@@ -2141,11 +2276,37 @@ async function loadCoreMemories(db: ReturnType<typeof getDb>, userId: string) {
     list.sort((a, b) => (b.lastSeenAt?.getTime?.() ?? 0) - (a.lastSeenAt?.getTime?.() ?? 0));
   }
 
-  const selected: typeof rows = [];
+  let selected: typeof filtered = [];
   for (const level of [0, 1, 2, 3, 4, 5]) {
     const list = byLevel.get(level) ?? [];
     selected.push(...list.slice(0, 5));
   }
+
+  // Keyword overlap filter: discard memories with zero relevance to the task
+  if (taskText && taskText.length > 20) {
+    const taskTokens = new Set(
+      taskText
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((t) => t.length > 2)
+    );
+    if (taskTokens.size > 0) {
+      selected = selected.filter((item) => {
+        if (item.pinned) return true; // Always keep pinned
+        const memoryText = `${item.key ?? ''} ${item.value ?? ''} ${item.module ?? ''}`;
+        const memoryTokens = memoryText
+          .toLowerCase()
+          .replace(/[^a-z0-9\s]/g, ' ')
+          .split(/\s+/)
+          .filter((t) => t.length > 2);
+        return memoryTokens.some((token) => taskTokens.has(token));
+      });
+    }
+  }
+
+  // Cap total memories
+  selected = selected.slice(0, config.memoryMaxItems);
 
   return selected.map((item) => ({
     id: item.id,
@@ -2248,7 +2409,7 @@ function truncateMemoryValue(value: string, level: number) {
   return value.length > maxChars ? value.slice(0, maxChars) : value;
 }
 
-function stableStringify(value: unknown) {
+function stableStringify(value: unknown): string {
   if (value === null || value === undefined) return String(value);
   if (typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) {
@@ -2464,7 +2625,7 @@ async function loadConversation(
     .where(
       and(
         eq(messages.channelId, channelId),
-        contextId ? eq(messages.contextId, contextId) : eq(messages.contextId, null)
+        contextId ? eq(messages.contextId, contextId) : isNull(messages.contextId)
       )
     )
     .orderBy(messages.createdAt);
