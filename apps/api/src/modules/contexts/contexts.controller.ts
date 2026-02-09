@@ -4,7 +4,7 @@ import { eq, and, desc } from 'drizzle-orm';
 import { ensureActiveContext, createContext } from '../../context.js';
 import { enqueueMemoryWrite } from '../../queue.js';
 import { createContextSchema, listContextsQuerySchema } from './contexts.schema.js';
-import { loadRecentMessages } from './contexts.service.js';
+import { loadRecentMessages, getContextExport } from './contexts.service.js';
 
 export async function contextRoutes(app: FastifyInstance) {
   // List contexts for a channel
@@ -163,5 +163,29 @@ export async function contextRoutes(app: FastifyInstance) {
       .where(and(eq(channels.id, context.channelId), eq(channels.userId, userId)));
 
     return { closed: true };
+  });
+
+  // Get full context export for debugging
+  app.get<{ Params: { id: string } }>('/api/contexts/:id/export', async (req, reply) => {
+    const userId = req.headers['x-user-id'] as string;
+    if (!userId) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+
+    const { id } = req.params;
+    const db = getDb();
+
+    const [context] = await db.select().from(contexts).where(eq(contexts.id, id)).limit(1);
+
+    if (!context || context.userId !== userId) {
+      return reply.status(404).send({ error: 'Context not found' });
+    }
+
+    const exportData = await getContextExport(db, id);
+
+    return {
+      context,
+      ...exportData,
+    };
   });
 }
