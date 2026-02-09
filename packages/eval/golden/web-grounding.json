@@ -1,0 +1,61 @@
+[
+  {
+    "name": "imdb-rating-grounded",
+    "description": "When asked for an IMDb rating, the agent should search, fetch the page, and report grounded data",
+    "category": "grounding",
+    "input": "What is the IMDb rating of The Dark Knight?",
+    "expected": {
+      "toolCalls": ["web.search", "web.fetch"],
+      "outputContains": ["9.0", "IMDb"],
+      "grounded": true,
+      "maxIterations": 8,
+      "shouldComplete": true
+    }
+  },
+  {
+    "name": "average-rating-uses-compute",
+    "description": "When asked for an average, the agent must use the compute tool",
+    "category": "compute",
+    "input": "What is the average IMDb rating of the Lord of the Rings trilogy?",
+    "expected": {
+      "toolCalls": ["web.search", "web.fetch", "compute.average"],
+      "grounded": true,
+      "maxIterations": 12,
+      "shouldComplete": true
+    }
+  },
+  {
+    "name": "disambiguation-clifford-series",
+    "description": "When asked about 'Clifford series', agent should disambiguate between multiple series",
+    "category": "disambiguation",
+    "input": "What are the IMDb ratings for the Clifford series?",
+    "expected": {
+      "toolCalls": ["web.search"],
+      "shouldDisambiguate": true,
+      "shouldComplete": true
+    }
+  },
+  {
+    "name": "simple-math-no-mental",
+    "description": "Agent should use compute tool for arithmetic, not mental math",
+    "category": "compute",
+    "input": "Calculate the average of these numbers: 8.5, 7.2, 6.9, 8.1, 7.8",
+    "expected": {
+      "toolCalls": ["compute.average"],
+      "outputContains": ["7.7"],
+      "maxIterations": 4,
+      "shouldComplete": true
+    }
+  },
+  {
+    "name": "memory-not-injected-web-qa",
+    "description": "Web Q&A queries should not load irrelevant memories",
+    "category": "memory",
+    "input": "Search for the latest news about autonomous AI agents",
+    "expected": {
+      "toolCalls": ["web.search"],
+      "maxIterations": 6,
+      "shouldComplete": true
+    }
+  }
+]

@@ -105,6 +105,7 @@ export interface PolicyContext {
   commandName: string;
   args: Record<string, unknown>;
   policyProfile: string;
+  runKind?: string;
 }
 
 // Run Types

@@ -55,12 +55,12 @@ export default function QueueOverviewPage() {
                 </p>
               </div>
             </div>
-            <Button asChild className="w-full">
-              <Link href="/dashboard/queue/tasks">
+            <Link href="/dashboard/queue/tasks">
+              <Button className="w-full">
                 <ListChecks className="mr-2 h-4 w-4" />
                 View Queue Tasks
-              </Link>
-            </Button>
+              </Button>
+            </Link>
           </CardContent>
         </Card>
 
@@ -90,12 +90,12 @@ export default function QueueOverviewPage() {
                 </p>
               </div>
             </div>
-            <Button asChild variant="outline" className="w-full">
-              <Link href="/dashboard/history">
+            <Link href="/dashboard/history">
+              <Button variant="outline" className="w-full">
                 <History className="mr-2 h-4 w-4" />
                 View History
-              </Link>
-            </Button>
+              </Button>
+            </Link>
           </CardContent>
         </Card>
       </div>

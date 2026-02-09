@@ -8,10 +8,11 @@ export async function listRunsForTenant(
   limit: number,
   offset: number
 ) {
-  const [{ count }] = await db
+  const [countRow] = await db
     .select({ count: sql<number>`count(*)` })
     .from(runs)
     .where(eq(runs.tenantId, tenantId));
+  const count = countRow?.count ?? 0;
   const total = Number(count ?? 0);
 
   const recentRuns = await db

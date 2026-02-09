@@ -7,6 +7,16 @@ export const discordEventSchema = z.object({
   content: z.string(),
   channelId: z.string().optional(),
   messageId: z.string().optional(),
+  attachments: z
+    .array(
+      z.object({
+        fileName: z.string().min(1),
+        mimeType: z.string().min(1).optional(),
+        sizeBytes: z.number().int().min(0).optional(),
+        dataBase64: z.string().min(1),
+      })
+    )
+    .optional(),
 });
 
 export const connectDiscordSchema = z.object({

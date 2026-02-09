@@ -35,4 +35,7 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
   toonDebugMode: process.env.TOON_DEBUG_MODE === 'true',
+  memoryMinConfidence: parseFloat(process.env.MEMORY_MIN_CONFIDENCE || '0.3'),
+  memoryMaxItems: parseInt(process.env.MEMORY_MAX_ITEMS || '15', 10),
+  memorySkipForWebQA: process.env.MEMORY_SKIP_WEB_QA !== 'false',
 };

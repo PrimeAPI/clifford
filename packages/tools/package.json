@@ -24,6 +24,7 @@
     "@clifford/db": "workspace:*",
     "@clifford/sdk": "workspace:*",
     "drizzle-orm": "^0.36.4",
+    "officeparser": "^5.2.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {

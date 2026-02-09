@@ -15,12 +15,14 @@ import { deliveryRoutes } from './modules/deliveries/deliveries.controller.js';
 import { memoryRoutes } from './modules/memories/memories.controller.js';
 import { toolRoutes } from './modules/tools/tools.controller.js';
 import { policyRoutes } from './modules/policies/policies.controller.js';
+import { fileRoutes } from './modules/files/files.controller.js';
 
 export function createApp() {
   const app = Fastify({
     logger: {
       level: config.logLevel,
     },
+    bodyLimit: config.apiBodyLimit,
   });
 
   app.register(cors);
@@ -36,6 +38,7 @@ export function createApp() {
   app.register(memoryRoutes);
   app.register(toolRoutes);
   app.register(policyRoutes);
+  app.register(fileRoutes);
   app.register(queueRoutes);
   app.register(deliveryRoutes);
 

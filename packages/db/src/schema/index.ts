@@ -21,3 +21,4 @@ export * from './discord-outbox';
 export * from './document-chunks';
 export * from './policy-rules';
 export * from './quota-usage';
+export * from './user-files';

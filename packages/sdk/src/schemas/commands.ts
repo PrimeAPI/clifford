@@ -11,6 +11,10 @@ export const toolCallSchema = z.object({
 export const sendMessageSchema = z.object({
   type: z.literal('send_message'),
   message: z.string().describe('Message content to send to the user'),
+  fileIds: z
+    .array(z.string().uuid())
+    .optional()
+    .describe('Optional file IDs to attach to the outgoing message'),
 });
 
 // Set Output Command
@@ -175,6 +179,11 @@ export const commandJsonSchema = {
       properties: {
         type: { type: 'string', const: 'send_message' },
         message: { type: 'string', description: 'Message content to send to the user' },
+        fileIds: {
+          type: 'array',
+          items: { type: 'string', format: 'uuid' },
+          description: 'Optional file IDs to attach to the outgoing message',
+        },
       },
       required: ['type', 'message'],
       additionalProperties: false,
@@ -367,4 +376,18 @@ export function parseCommandWithErrors(input: unknown): {
     return { success: true, data: result.data };
   }
   return { success: false, errors: result.error };
+}
+
+/**
+ * Format Zod validation errors into a concise, LLM-friendly string
+ * suitable for inclusion in a system note to guide the model toward
+ * producing a valid command.
+ */
+export function formatValidationError(errors: z.ZodError): string {
+  const issues = errors.issues.slice(0, 5).map((issue) => {
+    const path = issue.path.length > 0 ? `.${issue.path.join('.')}` : '(root)';
+    return `${path}: ${issue.message}`;
+  });
+  const suffix = errors.issues.length > 5 ? ` (and ${errors.issues.length - 5} more)` : '';
+  return `Validation failed: ${issues.join('; ')}${suffix}`;
 }

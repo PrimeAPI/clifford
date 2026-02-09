@@ -1,5 +1,13 @@
 import type { ToolContext, ToolDef } from '@clifford/sdk';
 import { z } from 'zod';
+import { TTLCache } from './cache.js';
+
+// Module-scoped caches (per worker process)
+const searchCache = new TTLCache<unknown>();
+const fetchCache = new TTLCache<unknown>();
+
+const DEFAULT_SEARCH_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const DEFAULT_FETCH_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours
 
 // ============================================================================
 // Schemas
@@ -438,6 +446,12 @@ function convertToMarkdown(parsed: ParsedHTML): string {
 // Tool Definition
 // ============================================================================
 
+/** Clear all web tool caches. Useful for tests. */
+export function clearWebCaches() {
+  searchCache.clear();
+  fetchCache.clear();
+}
+
 export const webTool: ToolDef = {
   name: 'web',
   shortDescription: 'Web search, fetch, and content extraction',
@@ -513,24 +527,39 @@ export const webTool: ToolDef = {
         const config = (ctx.toolConfig ?? {}) as {
           default_region?: string;
           default_safe_search?: string;
+          search_cache_ttl?: number;
         };
+
+        const effectiveRegion = region ?? config.default_region;
+        const effectiveSafeSearch = safeSearch ?? config.default_safe_search;
+        const cacheKey = `search:${query}:${limit}:${effectiveRegion ?? ''}:${effectiveSafeSearch ?? ''}`;
+        const cached = searchCache.get(cacheKey);
+        if (cached) {
+          ctx.logger.info({ query, cacheHit: true }, 'Web search cache hit');
+          return cached;
+        }
 
         try {
           const results = await searchWeb(
             query,
             limit,
-            region ?? config.default_region,
-            safeSearch ?? config.default_safe_search
+            effectiveRegion,
+            effectiveSafeSearch
           );
 
           ctx.logger.info({ query, resultCount: results.length }, 'Web search completed');
 
-          return {
+          const response = {
             success: true,
             query,
             resultCount: results.length,
             results,
           };
+
+          const ttl = (config.search_cache_ttl ?? DEFAULT_SEARCH_CACHE_TTL / 1000) * 1000;
+          searchCache.set(cacheKey, response, ttl > 0 ? ttl : DEFAULT_SEARCH_CACHE_TTL);
+
+          return response;
         } catch (error) {
           ctx.logger.error({ error, query }, 'Web search failed');
           return {
@@ -557,16 +586,29 @@ export const webTool: ToolDef = {
           maxLength = 10000,
           timeout = 10,
         } = webFetchArgs.parse(args);
+        const toolConfig = (ctx.toolConfig ?? {}) as { fetch_cache_ttl?: number };
+
+        const cacheKey = `fetch:${url}:${format}`;
+        const cached = fetchCache.get(cacheKey);
+        if (cached) {
+          ctx.logger.info({ url, cacheHit: true }, 'Web fetch cache hit');
+          return cached;
+        }
 
         try {
           const result = await fetchUrl(url, format, maxLength, timeout);
 
           ctx.logger.info({ url, format, contentLength: result.contentLength }, 'Web fetch completed');
 
-          return {
+          const response = {
             success: true,
             ...result,
           };
+
+          const ttl = (toolConfig.fetch_cache_ttl ?? DEFAULT_FETCH_CACHE_TTL / 1000) * 1000;
+          fetchCache.set(cacheKey, response, ttl > 0 ? ttl : DEFAULT_FETCH_CACHE_TTL);
+
+          return response;
         } catch (error) {
           ctx.logger.error({ error, url }, 'Web fetch failed');
           return {

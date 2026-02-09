@@ -4,7 +4,7 @@ export type FeaturesProps = {
   features: Feature[];
 };
 
-export function Features({ features }: FeaturesProps): JSX.Element {
+export function Features({ features }: FeaturesProps) {
   return (
     <section className="mt-24 grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
       {features.map((feature) => {

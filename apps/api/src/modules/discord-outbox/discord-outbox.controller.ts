@@ -25,7 +25,7 @@ export async function discordOutboxRoutes(app: FastifyInstance) {
       RETURNING id, user_id, discord_user_id, content, status, created_at
     `);
 
-    return { items: result.rows };
+    return { items: [...result] };
   });
 
   app.post('/api/discord/outbox/ack', async (req, reply) => {

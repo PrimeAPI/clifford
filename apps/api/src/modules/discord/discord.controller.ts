@@ -7,9 +7,12 @@ import {
   contexts,
   agents,
   runs,
+  userFiles,
 } from '@clifford/db';
 import { eq, and, sql, desc } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
+import path from 'path';
+import { mkdir, writeFile } from 'fs/promises';
 import { enqueueRun, enqueueMemoryWrite } from '../../queue.js';
 import { ensureActiveContext, createContext } from '../../context.js';
 import { config } from '../../config.js';
@@ -27,6 +30,13 @@ import {
   requireGatewayToken,
   resolveDiscordChannel,
 } from './discord.service.js';
+import {
+  buildDefaultSummary,
+  extractTextForIndexing,
+  sanitizeFileName,
+  decodeBase64Payload,
+  sha256Hex,
+} from '../files/files.service.js';
 
 export async function discordRoutes(app: FastifyInstance) {
   // OAuth callback
@@ -136,10 +146,11 @@ export async function discordRoutes(app: FastifyInstance) {
 
       const knownUserIndex = knownUsers.findIndex((user) => user.id === body.discordUserId);
       if (knownUserIndex >= 0) {
+        const existing = knownUsers[knownUserIndex]!;
         knownUsers[knownUserIndex] = {
-          ...knownUsers[knownUserIndex],
+          ...existing,
           username: body.discordUsername,
-          avatar: body.discordAvatar ?? knownUsers[knownUserIndex]?.avatar ?? null,
+          avatar: body.discordAvatar ?? existing.avatar ?? null,
           lastSeenAt: new Date().toISOString(),
         };
       } else {
@@ -169,13 +180,23 @@ export async function discordRoutes(app: FastifyInstance) {
       const messageId = randomUUID();
       const activeContext = await ensureActiveContext(db, allowlistedChannel);
       const contextId = activeContext?.id ?? allowlistedChannel.activeContextId ?? null;
+      const attachmentMeta = await persistDiscordAttachments({
+        db,
+        userId: allowlistedChannel.userId,
+        channelId: allowlistedChannel.id,
+        contextId,
+        attachments: body.attachments ?? [],
+      });
+      const inboundContent = body.content.trim();
+      const runInputText =
+        inboundContent || `User attached ${attachmentMeta.length} file(s) in Discord.`;
 
       await db.insert(messages).values({
         id: messageId,
         userId: allowlistedChannel.userId,
         channelId: allowlistedChannel.id,
         contextId,
-        content: body.content,
+        content: inboundContent,
         direction: 'inbound',
         deliveryStatus: 'delivered',
         deliveredAt: new Date(),
@@ -185,6 +206,7 @@ export async function discordRoutes(app: FastifyInstance) {
           discordUserId: body.discordUserId,
           discordUsername: body.discordUsername,
           discordAvatar: body.discordAvatar ?? null,
+          attachments: attachmentMeta,
         }),
       });
 
@@ -212,7 +234,7 @@ export async function discordRoutes(app: FastifyInstance) {
         contextId,
         kind: 'coordinator',
         rootRunId: runId,
-        inputText: body.content,
+        inputText: runInputText,
         outputText: '',
         status: 'pending',
       });
@@ -306,13 +328,22 @@ export async function discordRoutes(app: FastifyInstance) {
           })
         : null;
     const contextId = activeContext?.id ?? resolvedChannel?.activeContextId ?? null;
+    const attachmentMeta = await persistDiscordAttachments({
+      db,
+      userId: connection.userId,
+      channelId,
+      contextId,
+      attachments: body.attachments ?? [],
+    });
+    const inboundContent = body.content.trim();
+    const runInputText = inboundContent || `User attached ${attachmentMeta.length} file(s) in Discord.`;
 
     await db.insert(messages).values({
       id: messageId,
       userId: connection.userId,
       channelId,
       contextId,
-      content: body.content,
+      content: inboundContent,
       direction: 'inbound',
       deliveryStatus: 'delivered',
       deliveredAt: new Date(),
@@ -322,6 +353,7 @@ export async function discordRoutes(app: FastifyInstance) {
         discordUserId: body.discordUserId,
         discordUsername: body.discordUsername,
         discordAvatar: body.discordAvatar ?? null,
+        attachments: attachmentMeta,
       }),
     });
 
@@ -349,7 +381,7 @@ export async function discordRoutes(app: FastifyInstance) {
       contextId,
       kind: 'coordinator',
       rootRunId: runId,
-      inputText: body.content,
+      inputText: runInputText,
       outputText: '',
       status: 'pending',
     });
@@ -471,4 +503,82 @@ export async function discordRoutes(app: FastifyInstance) {
 
     return { activeContextId: context.id };
   });
+}
+
+async function persistDiscordAttachments({
+  db,
+  userId,
+  channelId,
+  contextId,
+  attachments,
+}: {
+  db: ReturnType<typeof getDb>;
+  userId: string;
+  channelId: string;
+  contextId: string | null;
+  attachments: Array<{
+    fileName: string;
+    mimeType?: string;
+    sizeBytes?: number;
+    dataBase64: string;
+  }>;
+}) {
+  if (attachments.length === 0) return [];
+
+  const userDir = path.resolve(config.fileStorageDir, userId);
+  await mkdir(userDir, { recursive: true });
+
+  const results: Array<{
+    fileId: string;
+    fileName: string;
+    mimeType: string;
+    sizeBytes: number;
+    summary: string | null;
+  }> = [];
+
+  for (const item of attachments.slice(0, 5)) {
+    const content = decodeBase64Payload(item.dataBase64);
+    if (content.length === 0 || content.length > config.maxUploadBytes) {
+      continue;
+    }
+
+    const fileId = randomUUID();
+    const safeName = sanitizeFileName(item.fileName);
+    const storagePath = path.resolve(userDir, `${fileId}-${safeName}`);
+    if (!storagePath.startsWith(userDir)) continue;
+
+    await writeFile(storagePath, content, { flag: 'wx' });
+    const mimeType = item.mimeType?.trim() || 'application/octet-stream';
+    const extractedText = extractTextForIndexing({ mimeType, fileName: safeName, content });
+    const summary = buildDefaultSummary(extractedText);
+
+    const [file] = await db
+      .insert(userFiles)
+      .values({
+        id: fileId,
+        userId,
+        channelId,
+        contextId,
+        fileName: safeName,
+        mimeType,
+        sizeBytes: content.length,
+        storagePath,
+        sha256: sha256Hex(content),
+        extractedText: extractedText || null,
+        summary,
+      })
+      .returning();
+
+    if (file) {
+      results.push({
+        fileId: file.id,
+        fileName: file.fileName,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        summary: file.summary ?? null,
+      });
+    }
+  }
+
+  return results;
 }

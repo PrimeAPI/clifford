@@ -6,6 +6,8 @@ import { remindersTool } from './reminders.js';
 import { weatherTool } from './weather.js';
 import { retrievalTool } from './retrieval.js';
 import { webTool } from './web.js';
+import { computeTool } from './compute.js';
+import { filesTool } from './files.js';
 
 export const DEFAULT_TOOLS: ToolDef[] = [systemTool, toolsTool, memoryTool];
 export const NATIVE_TOOLS: ToolDef[] = [
@@ -16,6 +18,8 @@ export const NATIVE_TOOLS: ToolDef[] = [
   weatherTool,
   retrievalTool,
   webTool,
+  computeTool,
+  filesTool,
 ];
 
 export {
@@ -26,4 +30,6 @@ export {
   weatherTool,
   retrievalTool,
   webTool,
+  computeTool,
+  filesTool,
 };

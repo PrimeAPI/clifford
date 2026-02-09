@@ -13,4 +13,5 @@ export interface ToolDef {
 
 export interface PromptOptions {
   runKind: string;
+  locale?: string;
 }

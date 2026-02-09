@@ -9,7 +9,7 @@ import {
   contexts,
   memoryItems,
 } from '@clifford/db';
-import { eq, and, desc, ne, asc, inArray, sql } from 'drizzle-orm';
+import { eq, and, desc, ne, asc, inArray, sql, isNull } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { config } from './config.js';
 import { enqueueDelivery, enqueueMemoryWrite } from './queues.js';
@@ -105,7 +105,7 @@ export async function processMessage(job: Job<MessageJob>, logger: Logger) {
       .where(
         and(
           eq(messages.channelId, channel.id),
-          contextId ? eq(messages.contextId, contextId) : eq(messages.contextId, null)
+          contextId ? eq(messages.contextId, contextId) : isNull(messages.contextId)
         )
       )
       .orderBy(desc(messages.createdAt))
@@ -164,10 +164,10 @@ export async function processMessage(job: Job<MessageJob>, logger: Logger) {
     const conversation: OpenAIMessage[] = [
       { role: 'system', content: systemPrompt },
       { role: 'system', content: systemInfoLines.join('\n') },
-      ...(memoryBlock ? [{ role: 'system', content: memoryBlock }] : []),
+      ...(memoryBlock ? [{ role: 'system' as const, content: memoryBlock }] : []),
       ...crossChannelBlocks,
       ...historyOrdered.map((entry) => ({
-        role: entry.direction === 'inbound' ? 'user' : 'assistant',
+        role: (entry.direction === 'inbound' ? 'user' : 'assistant') as 'user' | 'assistant',
         content: entry.content,
       })),
     ];
@@ -297,10 +297,11 @@ export async function processMessage(job: Job<MessageJob>, logger: Logger) {
       }
     }
 
-    if (contextId) {
+    const catchContextId = message.contextId ?? channel.activeContextId ?? null;
+    if (catchContextId) {
       await updateContextAfterResponse({
         db,
-        contextId,
+        contextId: catchContextId,
         userId: message.userId,
         logger,
       });
@@ -434,7 +435,7 @@ async function compactContext({
   }
 
   const segmentMessages = older.slice(-config.memoryWriterMaxMessages).map((entry) => ({
-    direction: entry.direction,
+    direction: entry.direction as 'inbound' | 'outbound',
     content: entry.content,
     createdAt: entry.createdAt?.toISOString?.() ?? undefined,
   }));
@@ -452,7 +453,9 @@ async function compactContext({
     await db.delete(messages).where(inArray(messages.id, olderIds));
   }
 
+  // Count remaining inbound messages as turns (each inbound triggers one turnCount increment)
   const newTurnCount = newer.filter((entry) => entry.direction === 'inbound').length;
+  // Note: turnCount is incremented once per inbound message processing cycle (updateContextAfterResponse)
   await db
     .update(contexts)
     .set({ turnCount: newTurnCount, updatedAt: new Date() })

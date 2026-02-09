@@ -56,7 +56,12 @@ const startDeliveryWorker = () => {
 
       const { provider, payload, messageId } = job.data as {
         provider?: string;
-        payload?: { discordUserId?: string; content?: string };
+        payload?: {
+          userId?: string;
+          discordUserId?: string;
+          content?: string;
+          attachments?: Array<{ fileId?: string; fileName?: string }>;
+        };
         messageId?: string;
       };
 
@@ -65,14 +70,44 @@ const startDeliveryWorker = () => {
       }
 
       const discordUserId = payload?.discordUserId;
-      const content = payload?.content;
+      const content = payload?.content?.trim() ?? '';
+      const attachmentRefs = Array.isArray(payload?.attachments) ? payload.attachments : [];
+      const userId = payload?.userId;
 
-      if (!discordUserId || !content || !messageId) {
+      if (!discordUserId || !messageId) {
         throw new Error('Missing Discord delivery payload');
       }
 
+      const files: Array<{ attachment: Buffer; name: string }> = [];
+      for (const attachment of attachmentRefs) {
+        if (!attachment.fileId || !userId) continue;
+        const response = await fetch(`${config.apiUrl}/api/files/${attachment.fileId}/content`, {
+          headers: {
+            'X-Delivery-Token': config.deliveryToken,
+            'X-Delivery-User-Id': userId,
+          },
+        });
+        if (!response.ok) {
+          throw new Error(
+            `Failed to fetch attachment ${attachment.fileId}: ${response.status} ${await response.text()}`
+          );
+        }
+        const bytes = Buffer.from(await response.arrayBuffer());
+        files.push({
+          attachment: bytes,
+          name: attachment.fileName?.trim() || `file-${attachment.fileId}`,
+        });
+      }
+
+      if (!content && files.length === 0) {
+        throw new Error('Delivery payload has no content or attachments');
+      }
+
       const user = await client.users.fetch(discordUserId);
-      await user.send(content);
+      await user.send({
+        content: content || undefined,
+        files: files.length > 0 ? files : undefined,
+      });
 
       const ackResponse = await fetch(`${config.apiUrl}/api/deliveries/ack`, {
         method: 'POST',
@@ -124,8 +159,9 @@ client.on(Events.MessageCreate, async (message) => {
   const content = isDM
     ? message.content
     : message.content.replace(`<@${client.user?.id}>`, '').trim();
+  const attachmentEntries = Array.from(message.attachments.values());
 
-  if (!content.trim()) {
+  if (!content.trim() && attachmentEntries.length === 0) {
     await message.reply('Please include a message after mentioning me.');
     return;
   }
@@ -166,6 +202,40 @@ client.on(Events.MessageCreate, async (message) => {
 
   // Forward to API webhook
   try {
+    const inboundAttachments: Array<{
+      fileName: string;
+      mimeType: string;
+      sizeBytes: number;
+      dataBase64: string;
+    }> = [];
+    for (const attachment of attachmentEntries.slice(0, 5)) {
+      try {
+        const res = await fetch(attachment.url);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const bytes = Buffer.from(await res.arrayBuffer());
+        inboundAttachments.push({
+          fileName: attachment.name || `discord-${attachment.id}`,
+          mimeType: attachment.contentType || 'application/octet-stream',
+          sizeBytes: attachment.size,
+          dataBase64: bytes.toString('base64'),
+        });
+      } catch (err) {
+        logger.warn(
+          { err, attachmentId: attachment.id, messageId: message.id },
+          'Failed to fetch Discord attachment payload'
+        );
+      }
+    }
+
+    if (!content.trim() && inboundAttachments.length === 0) {
+      await message.reply(
+        '❌ I could not read the attachment payload. Please re-upload the file or include text.'
+      );
+      return;
+    }
+
     const response = await fetch(`${config.apiUrl}/api/discord/webhook`, {
       method: 'POST',
       headers: {
@@ -178,6 +248,7 @@ client.on(Events.MessageCreate, async (message) => {
         content,
         channelId: message.channelId,
         messageId: message.id,
+        attachments: inboundAttachments,
       }),
     });
 

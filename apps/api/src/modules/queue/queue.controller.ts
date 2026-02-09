@@ -80,16 +80,16 @@ export async function queueRoutes(app: FastifyInstance) {
         messages: {
           counts: messageCounts,
           active: messageActive.map((job) =>
-            serializeJob(job, messageMeta.get(job.id) ?? undefined)
+            serializeJob(job, messageMeta.get(job.id!) ?? undefined)
           ),
           waiting: messageWaiting.map((job) =>
-            serializeJob(job, messageMeta.get(job.id) ?? undefined)
+            serializeJob(job, messageMeta.get(job.id!) ?? undefined)
           ),
           completed: messageCompleted.map((job) =>
-            serializeJob(job, messageMeta.get(job.id) ?? undefined)
+            serializeJob(job, messageMeta.get(job.id!) ?? undefined)
           ),
           failed: messageFailed.map((job) =>
-            serializeJob(job, messageMeta.get(job.id) ?? undefined)
+            serializeJob(job, messageMeta.get(job.id!) ?? undefined)
           ),
         },
         deliveries: {
@@ -101,14 +101,14 @@ export async function queueRoutes(app: FastifyInstance) {
         },
         memoryWrites: {
           counts: memoryCounts,
-          active: memoryActive.map((job) => serializeJob(job, memoryMeta.get(job.id) ?? undefined)),
+          active: memoryActive.map((job) => serializeJob(job, memoryMeta.get(job.id!) ?? undefined)),
           waiting: memoryWaiting.map((job) =>
-            serializeJob(job, memoryMeta.get(job.id) ?? undefined)
+            serializeJob(job, memoryMeta.get(job.id!) ?? undefined)
           ),
           completed: memoryCompleted.map((job) =>
-            serializeJob(job, memoryMeta.get(job.id) ?? undefined)
+            serializeJob(job, memoryMeta.get(job.id!) ?? undefined)
           ),
-          failed: memoryFailed.map((job) => serializeJob(job, memoryMeta.get(job.id) ?? undefined)),
+          failed: memoryFailed.map((job) => serializeJob(job, memoryMeta.get(job.id!) ?? undefined)),
         },
       },
     };

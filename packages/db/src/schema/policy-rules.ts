@@ -39,6 +39,7 @@ export interface PolicyConditions {
   command?: string; // Full command pattern (e.g., 'memory.put')
   classification?: 'READ' | 'WRITE' | 'DESTRUCT' | 'SENSITIVE';
   argsPattern?: Record<string, unknown>; // Match specific argument values
+  runKind?: string; // Match run kind (e.g., 'coordinator', 'subagent')
 }
 
 export interface PolicyConfig {

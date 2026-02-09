@@ -70,12 +70,12 @@ const buildQueueTasks = (queueStatus: ReturnType<typeof useQueueStatus>['queueSt
       data: job.data,
       failedReason: job.failedReason,
       timestamp: getTaskTime(job),
-      kind: 'queue',
+      kind: 'queue' as const,
     }))
   );
 };
 
-const buildRunTasks = (runs: RunRecord[]) =>
+const buildRunTasks = (runs: RunRecord[]): HistoryTask[] =>
   runs.map((run) => ({
     id: run.id,
     queue: 'Runs',
@@ -83,7 +83,7 @@ const buildRunTasks = (runs: RunRecord[]) =>
     name: run.agentName ? run.agentName : `Agent ${run.agentId}`,
     detail: run.inputText,
     timestamp: new Date(run.updatedAt || run.createdAt).getTime(),
-    kind: 'run',
+    kind: 'run' as const,
   }));
 
 const formatTimestamp = (timestamp?: number) => {
@@ -174,7 +174,7 @@ export default function HistoryPage() {
   }, [loadRuns]);
 
   const tasks = useMemo(() => {
-    const combined = [...buildRunTasks(runs), ...buildQueueTasks(queueStatus)];
+    const combined: HistoryTask[] = [...buildRunTasks(runs), ...buildQueueTasks(queueStatus)];
     return combined.sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
   }, [runs, queueStatus]);
 
@@ -273,7 +273,7 @@ export default function HistoryPage() {
                     ? 'All Queues'
                     : option === 'memorywrites'
                       ? 'Memory Writes'
-                      : option[0].toUpperCase() + option.slice(1)}
+                      : option[0]!.toUpperCase() + option.slice(1)}
                 </option>
               ))}
             </select>

@@ -8,7 +8,7 @@ export type HeaderProps = {
   links: NavLink[];
 };
 
-export function Header({ links }: HeaderProps): JSX.Element {
+export function Header({ links }: HeaderProps) {
   return (
     <header className="border-b border-border">
       <div className="container mx-auto flex h-16 items-center justify-between px-4">

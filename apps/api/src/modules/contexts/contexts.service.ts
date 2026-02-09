@@ -14,7 +14,7 @@ export async function loadRecentMessages(
     .limit(limit);
 
   return rows.reverse().map((row) => ({
-    direction: row.direction,
+    direction: row.direction as 'inbound' | 'outbound',
     content: row.content,
     createdAt: row.createdAt?.toISOString?.() ?? undefined,
   }));

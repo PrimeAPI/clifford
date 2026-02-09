@@ -41,10 +41,11 @@ export async function ensureActiveContext(db: DbClient, channel: ChannelRow) {
 }
 
 export async function createContext(db: DbClient, channel: ChannelRow, name?: string) {
-  const [{ count }] = await db
+  const [countRow] = await db
     .select({ count: sql<number>`count(*)` })
     .from(contexts)
     .where(eq(contexts.channelId, channel.id));
+  const count = countRow?.count ?? 0;
 
   const existingCount = Number(count ?? 0);
   const nextIndex = existingCount + 1;

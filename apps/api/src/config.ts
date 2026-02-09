@@ -22,6 +22,10 @@ const envSchema = z
     ALLOWED_DISCORD_USER_IDS: z.string().optional(),
     ALLOWED_DISCORD_USERNAMES: z.string().optional(),
     KNOWN_DISCORD_USERS: z.string().optional(),
+    FILE_STORAGE_DIR: z.string().default('/tmp/clifford-uploads'),
+    MAX_UPLOAD_BYTES: z.coerce.number().int().min(1024).default(10 * 1024 * 1024),
+    API_BODY_LIMIT: z.coerce.number().int().min(1024).default(25 * 1024 * 1024),
+    MAX_EXTRACTED_TEXT_CHARS: z.coerce.number().int().min(1000).default(30000),
   })
   .refine((env) => env.DELIVERY_TOKEN || env.DISCORD_OUTBOX_TOKEN, {
     message: 'DELIVERY_TOKEN or DISCORD_OUTBOX_TOKEN is required',
@@ -64,4 +68,8 @@ export const config = {
   allowedDiscordUserIds,
   allowedDiscordUsernames,
   knownDiscordUsers,
+  fileStorageDir: env.FILE_STORAGE_DIR,
+  maxUploadBytes: env.MAX_UPLOAD_BYTES,
+  apiBodyLimit: env.API_BODY_LIMIT,
+  maxExtractedTextChars: env.MAX_EXTRACTED_TEXT_CHARS,
 };

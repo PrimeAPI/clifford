@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { webTool } from '../../src/web.js';
+import { webTool, clearWebCaches } from '../../src/web.js';
 import { createMockContext, mockGlobalFetch, restoreGlobalFetch, createMockFetchResponse } from '../test-utils.js';
 import type { ToolContext } from '@clifford/sdk';
 
@@ -12,6 +12,7 @@ describe('web tool [unit]', () => {
 
   beforeEach(() => {
     ctx = createMockContext();
+    clearWebCaches();
   });
 
   afterEach(() => {

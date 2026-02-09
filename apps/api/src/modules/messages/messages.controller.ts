@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
-import { getDb, messages, channels, contexts, agents, runs } from '@clifford/db';
-import { eq, and, desc } from 'drizzle-orm';
+import { getDb, messages, channels, contexts, agents, runs, userFiles } from '@clifford/db';
+import { eq, and, desc, isNull, inArray } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { enqueueRun } from '../../queue.js';
 import { sendMessageSchema } from './messages.schema.js';
@@ -67,7 +67,7 @@ export async function messageRoutes(app: FastifyInstance) {
               eq(messages.channelId, channelId),
               scopedContextId
                 ? eq(messages.contextId, scopedContextId)
-                : eq(messages.contextId, null)
+                : isNull(messages.contextId)
             )
           )
           .orderBy(desc(messages.createdAt))
@@ -94,6 +94,7 @@ export async function messageRoutes(app: FastifyInstance) {
 
     const body = sendMessageSchema.parse(req.body);
     const db = getDb();
+    const content = body.content.trim();
 
     // Verify channel belongs to user
     const channel = await findUserChannel(db, body.channelId, userId);
@@ -118,6 +119,46 @@ export async function messageRoutes(app: FastifyInstance) {
       contextId = resolved?.id ?? null;
     }
 
+    let attachmentMeta: Array<{
+      fileId: string;
+      fileName: string;
+      mimeType: string;
+      sizeBytes: number;
+      summary: string | null;
+    }> = [];
+
+    if (body.fileIds.length > 0) {
+      const uniqueFileIds = [...new Set(body.fileIds)];
+      const rows = await db
+        .select()
+        .from(userFiles)
+        .where(and(eq(userFiles.userId, userId), inArray(userFiles.id, uniqueFileIds)));
+
+      if (rows.length !== uniqueFileIds.length) {
+        return reply.status(400).send({ error: 'One or more fileIds are invalid for this user' });
+      }
+
+      const invalidChannel = rows.find((file) => file.channelId !== body.channelId);
+      if (invalidChannel) {
+        return reply.status(400).send({
+          error: `File ${invalidChannel.id} belongs to a different channel and cannot be attached`,
+        });
+      }
+
+      attachmentMeta = rows.map((file) => ({
+        fileId: file.id,
+        fileName: file.fileName,
+        mimeType: file.mimeType,
+        sizeBytes: file.sizeBytes,
+        summary: file.summary ?? null,
+      }));
+    }
+
+    const inboundMetadata: Record<string, unknown> = {};
+    if (attachmentMeta.length > 0) {
+      inboundMetadata.attachments = attachmentMeta;
+    }
+
     const [message] = await db
       .insert(messages)
       .values({
@@ -125,10 +166,11 @@ export async function messageRoutes(app: FastifyInstance) {
         userId,
         channelId: body.channelId,
         contextId,
-        content: body.content,
+        content,
         direction: 'inbound',
         deliveryStatus: 'delivered',
         deliveredAt: new Date(),
+        metadata: Object.keys(inboundMetadata).length > 0 ? JSON.stringify(inboundMetadata) : null,
       })
       .returning();
 
@@ -159,6 +201,7 @@ export async function messageRoutes(app: FastifyInstance) {
       }
 
       const runId = randomUUID();
+      const runInputText = content || `User attached ${attachmentMeta.length} file(s).`;
       await db.insert(runs).values({
         id: runId,
         tenantId: agent.tenantId,
@@ -168,7 +211,7 @@ export async function messageRoutes(app: FastifyInstance) {
         contextId,
         kind: 'coordinator',
         rootRunId: runId,
-        inputText: body.content,
+        inputText: runInputText,
         outputText: '',
         status: 'pending',
       });
@@ -176,7 +219,7 @@ export async function messageRoutes(app: FastifyInstance) {
       await db
         .update(messages)
         .set({
-          metadata: JSON.stringify({ runId, kind: 'coordinator' }),
+          metadata: JSON.stringify({ ...inboundMetadata, runId, kind: 'coordinator' }),
         })
         .where(eq(messages.id, message.id));
 

@@ -62,9 +62,10 @@ export async function resolveDiscordChannel(
 
     const knownUserIndex = knownUsers.findIndex((user) => user.id === discordUserId);
     if (knownUserIndex >= 0) {
+      const existing = knownUsers[knownUserIndex]!;
       knownUsers[knownUserIndex] = {
-        ...knownUsers[knownUserIndex],
-        username: discordUsername ?? knownUsers[knownUserIndex]?.username ?? '',
+        ...existing,
+        username: discordUsername ?? existing.username ?? '',
         lastSeenAt: new Date().toISOString(),
       };
     } else if (discordUsername) {

@@ -14,6 +14,7 @@ export const runSteps = pgTable(
     argsJson: jsonb('args_json'),
     resultJson: jsonb('result_json'),
     status: text('status').notNull().default('pending'), // pending|running|completed|failed
+    // metadata: jsonb('metadata'), // TODO: Add via migration — canonicalized, repaired, validation_errors, provenance, cache_hit
     idempotencyKey: text('idempotency_key').notNull(),
     createdAt: timestamp('created_at').notNull().defaultNow(),
   },

@@ -21,6 +21,7 @@ import {
   userToolSettings,
   triggers,
   agents,
+  userFiles,
 } from '@clifford/db';
 import { eq, and, desc, inArray, isNull } from 'drizzle-orm';
 import { PolicyEngine, createBudgetState, type BudgetState } from '@clifford/policy';
@@ -51,6 +52,7 @@ type RunCommand =
   | {
       type: 'send_message';
       message: string;
+      fileIds?: string[];
     }
   | {
       type: 'set_output';
@@ -353,6 +355,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     let validationAttempts = 0;
     let lastValidatedOutput = '';
     let lastValidationFeedback = '';
+    const pendingCreatedFileIds: string[] = [];
+    const pendingReferencedFileIds: string[] = [];
     let budgetExceededOnce = false;
     let budgetDecisionLogged = false;
     let lastBudgetDecision: { action: 'extend' | 'finish'; reason: string } | null = null;
@@ -435,7 +439,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     );
     const priorSpawnSignatures = await loadPriorSpawnSignatures(db, runId);
 
-    const commitUserVisibleMessage = async (message: string, reason: string) => {
+    const commitUserVisibleMessage = async (message: string, reason: string, fileIds?: string[]) => {
       if (run.kind === 'subagent') {
         return { committed: false as const, blockedReason: 'subagent' as const };
       }
@@ -491,6 +495,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         channelId: run.channelId ?? '',
         contextId: run.contextId ?? null,
         content: message,
+        fileIds,
         logger,
         runId,
         runKind: run.kind ?? 'coordinator',
@@ -528,7 +533,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       return { committed: true as const, blockedReason: null };
     };
 
-    const finishRun = async (message: string, reason: string) => {
+    const finishRun = async (message: string, reason: string, fileIds?: string[]) => {
       await db
         .update(runs)
         .set({ outputText: message, status: 'completed', updatedAt: new Date() })
@@ -540,7 +545,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         resultJson: { output: message, reason },
       });
       if (run.kind !== 'subagent') {
-        await commitUserVisibleMessage(message, reason);
+        await commitUserVisibleMessage(message, reason, fileIds);
       }
       logger.info('Run completed', { runId, reason });
       if (run.parentRunId) {
@@ -1211,6 +1216,21 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         repeatedResultCounts.set(toolResultSignature, resultCount);
         if (result.success) {
           progressTick += 1;
+          const createdFileIds = extractCreatedFileIdsFromToolResult(toolCall.name, result.result);
+          for (const fileId of createdFileIds) {
+            if (!pendingCreatedFileIds.includes(fileId)) {
+              pendingCreatedFileIds.push(fileId);
+            }
+          }
+          const referencedFileIds = extractReferencedFileIdsFromToolResult(
+            toolCall.name,
+            result.result
+          );
+          for (const fileId of referencedFileIds) {
+            if (!pendingReferencedFileIds.includes(fileId)) {
+              pendingReferencedFileIds.push(fileId);
+            }
+          }
           // Track provenance for web tools
           const toolBase = toolCall.name.split('.')[0];
           const toolCmd = toolCall.name.split('.')[1];
@@ -1271,6 +1291,25 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         actionViolationCount = 0;
         consecutiveNotes = 0;
         const message = command.message?.trim();
+        let fileIds = normalizeUuidArray(command.fileIds);
+        if (fileIds.length === 0 && pendingCreatedFileIds.length > 0) {
+          fileIds = [...pendingCreatedFileIds];
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'auto_attach_files', fileIds },
+          });
+        }
+        if (fileIds.length === 0 && pendingReferencedFileIds.length > 0) {
+          fileIds = [...pendingReferencedFileIds];
+          await appendRunStep(db, {
+            runId,
+            seq: stepSeq++,
+            type: 'message',
+            resultJson: { event: 'auto_attach_files', source: 'referenced_files', fileIds },
+          });
+        }
         if (!message) {
           throw new Error('send_message requires a non-empty message');
         }
@@ -1301,7 +1340,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           runId,
           seq: stepSeq++,
           type: 'message',
-          resultJson: { event: 'draft_message', source: 'send_message', message },
+          resultJson: { event: 'draft_message', source: 'send_message', message, fileIds },
         });
         const validation = await validateOutput(message, 'send_message', userPayload);
         if (validation.decision === 'revise') {
@@ -1325,7 +1364,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           continue;
         }
 
-        await finishRun(message, 'send_message');
+        await finishRun(message, 'send_message', fileIds);
         return;
       }
 
@@ -1727,6 +1766,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           channelId: run.channelId ?? '',
           contextId: run.contextId ?? null,
           content: message,
+          fileIds: [],
           logger,
           runId,
           runKind: run.kind ?? 'coordinator',
@@ -2535,6 +2575,7 @@ async function sendRunMessage({
   channelId,
   contextId,
   content,
+  fileIds,
   logger,
   runId,
   runKind,
@@ -2544,6 +2585,7 @@ async function sendRunMessage({
   channelId: string;
   contextId: string | null;
   content: string;
+  fileIds?: string[];
   logger: Logger;
   runId: string;
   runKind: string;
@@ -2552,6 +2594,34 @@ async function sendRunMessage({
   if (!channel || channel.userId !== userId) {
     logger.warn({ channelId, userId }, 'Channel not found for run message');
     return false;
+  }
+
+  const outgoingFileIds = normalizeUuidArray(fileIds);
+  let attachments: Array<{
+    fileId: string;
+    fileName: string;
+    mimeType: string;
+    sizeBytes: number;
+    summary: string | null;
+  }> = [];
+  if (outgoingFileIds.length > 0) {
+    const rows = await db
+      .select()
+      .from(userFiles)
+      .where(and(eq(userFiles.userId, userId), inArray(userFiles.id, outgoingFileIds)));
+    if (rows.length !== outgoingFileIds.length) {
+      logger.warn(
+        { userId, requested: outgoingFileIds.length, resolved: rows.length },
+        'Some outbound file IDs were not found for user'
+      );
+    }
+    attachments = rows.map((file) => ({
+      fileId: file.id,
+      fileName: file.fileName,
+      mimeType: file.mimeType,
+      sizeBytes: file.sizeBytes,
+      summary: file.summary ?? null,
+    }));
   }
 
   let outboundId: string | null = null;
@@ -2571,6 +2641,7 @@ async function sendRunMessage({
           source: 'run',
           runId,
           kind: runKind,
+          attachments,
         }),
       })
       .returning();
@@ -2617,8 +2688,13 @@ async function sendRunMessage({
         provider: 'discord',
         messageId: outboundId,
         payload: {
+          userId,
           discordUserId,
           content,
+          attachments: attachments.map((item) => ({
+            fileId: item.fileId,
+            fileName: item.fileName,
+          })),
         },
       });
     } catch (err) {
@@ -2641,6 +2717,52 @@ async function sendRunMessage({
 
   logger.info({ channelId, messageId: outboundId }, 'Run message sent');
   return true;
+}
+
+function normalizeUuidArray(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    ),
+  ];
+}
+
+function extractCreatedFileIdsFromToolResult(toolName: string, toolResultPayload: unknown) {
+  if (toolName !== 'files.create_text') return [];
+  if (!toolResultPayload || typeof toolResultPayload !== 'object') return [];
+  const payload = toolResultPayload as {
+    file?: {
+      id?: unknown;
+    };
+  };
+  const fileId = payload.file?.id;
+  if (typeof fileId === 'string' && fileId.trim().length > 0) {
+    return [fileId];
+  }
+  return [];
+}
+
+function extractReferencedFileIdsFromToolResult(toolName: string, toolResultPayload: unknown) {
+  if (!toolResultPayload || typeof toolResultPayload !== 'object') return [];
+  const payload = toolResultPayload as {
+    file?: {
+      id?: unknown;
+    };
+  };
+
+  if (
+    toolName === 'files.get' ||
+    toolName === 'files.read_text' ||
+    toolName === 'files.update_summary'
+  ) {
+    const fileId = payload.file?.id;
+    if (typeof fileId === 'string' && fileId.trim().length > 0) {
+      return [fileId];
+    }
+  }
+
+  return [];
 }
 
 async function resolveDiscordRecipientUserId({
@@ -2723,8 +2845,56 @@ async function loadConversation(
 
   return rows.map((row) => ({
     role: row.direction === 'inbound' ? 'user' : 'assistant',
-    content: row.content,
+    content: formatMessageContentForModel(row.content, row.metadata),
   }));
+}
+
+function formatMessageContentForModel(content: string, metadata: string | null) {
+  if (!metadata) return content;
+
+  try {
+    const parsed = JSON.parse(metadata) as {
+      attachments?: Array<{
+        fileId?: string;
+        fileName?: string;
+        mimeType?: string;
+        sizeBytes?: number;
+        summary?: string | null;
+      }>;
+    };
+    const attachments = Array.isArray(parsed.attachments) ? parsed.attachments : [];
+    if (attachments.length === 0) return content;
+
+    const fileLines = attachments
+      .filter((file) => typeof file.fileName === 'string' && file.fileName.trim())
+      .map((file) => {
+        const parts: string[] = [];
+        parts.push(file.fileName ?? 'unknown');
+        if (typeof file.mimeType === 'string' && file.mimeType) {
+          parts.push(file.mimeType);
+        }
+        if (typeof file.sizeBytes === 'number') {
+          parts.push(`${file.sizeBytes} bytes`);
+        }
+        if (typeof file.fileId === 'string' && file.fileId) {
+          parts.push(`id=${file.fileId}`);
+        }
+
+        const summary =
+          typeof file.summary === 'string' && file.summary.trim()
+            ? ` summary: ${file.summary.trim().slice(0, 240)}`
+            : '';
+        return `- ${parts.join(' |')}${summary}`;
+      });
+
+    if (fileLines.length === 0) return content;
+    if (!content.trim()) {
+      return `Attached files:\n${fileLines.join('\n')}`;
+    }
+    return `${content}\n\nAttached files:\n${fileLines.join('\n')}`;
+  } catch {
+    return content;
+  }
 }
 
 async function loadSubagentResults(db: ReturnType<typeof getDb>, runId: string) {

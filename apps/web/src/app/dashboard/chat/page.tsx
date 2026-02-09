@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Send, Globe, MessageSquare, Loader2 } from 'lucide-react';
+import { Send, Globe, MessageSquare, Loader2, Paperclip, X, Download } from 'lucide-react';
 import { RunVisualization } from './run-visualization';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -24,6 +24,25 @@ interface Message {
   contextId?: string | null;
 }
 
+interface FileRecord {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  summary?: string | null;
+  canInlinePreview?: boolean;
+}
+
+interface MessageAttachment {
+  fileId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  summary?: string | null;
+}
+
+const DEMO_USER_ID = '00000000-0000-0000-0000-000000000001';
+
 interface ContextItem {
   id: string;
   name: string;
@@ -41,8 +60,12 @@ export default function ChatPage() {
   const [contexts, setContexts] = useState<ContextItem[]>([]);
   const [activeContextId, setActiveContextId] = useState<string | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
+  const [composerFiles, setComposerFiles] = useState<FileRecord[]>([]);
+  const [uploadingFiles, setUploadingFiles] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const lastMessageIdRef = useRef<string | null>(null);
   const pendingReplyToRef = useRef<string | null>(null);
   const pendingSinceRef = useRef<number | null>(null);
@@ -123,9 +146,8 @@ export default function ChatPage() {
 
   const loadWebChannel = async () => {
     try {
-      const userId = '00000000-0000-0000-0000-000000000001';
       const res = await fetch('/api/channels', {
-        headers: { 'X-User-Id': userId },
+        headers: { 'X-User-Id': DEMO_USER_ID },
       });
       const data = await res.json();
       const web = (data.channels || []).find((c: Channel) => c.type === 'web');
@@ -141,10 +163,9 @@ export default function ChatPage() {
     if (!webChannel) return;
 
     try {
-      const userId = '00000000-0000-0000-0000-000000000001';
       const contextParam = activeContextId ? `&contextId=${activeContextId}` : '';
       const res = await fetch(`/api/messages?channelId=${webChannel.id}${contextParam}`, {
-        headers: { 'X-User-Id': userId },
+        headers: { 'X-User-Id': DEMO_USER_ID },
       });
       const data = await res.json();
       const nextMessages: Message[] = (data.messages || []).reverse();
@@ -213,9 +234,8 @@ export default function ChatPage() {
 
     setContextLoading(true);
     try {
-      const userId = '00000000-0000-0000-0000-000000000001';
       const res = await fetch(`/api/contexts?channelId=${webChannel.id}`, {
-        headers: { 'X-User-Id': userId },
+        headers: { 'X-User-Id': DEMO_USER_ID },
       });
       const data = await res.json();
       setContexts(data.contexts || []);
@@ -232,13 +252,12 @@ export default function ChatPage() {
 
     setContextLoading(true);
     try {
-      const userId = '00000000-0000-0000-0000-000000000001';
       if (activeContextId) {
         await fetch(`/api/contexts/${activeContextId}/close`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-User-Id': userId,
+            'X-User-Id': DEMO_USER_ID,
           },
         });
       }
@@ -246,7 +265,7 @@ export default function ChatPage() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': userId,
+          'X-User-Id': DEMO_USER_ID,
         },
         body: JSON.stringify({
           channelId: webChannel.id,
@@ -263,38 +282,119 @@ export default function ChatPage() {
     }
   };
 
+  const uploadFile = async (file: File): Promise<FileRecord> => {
+    if (!webChannel) {
+      throw new Error('Web channel not available');
+    }
+
+    const dataBase64 = await readFileAsBase64(file);
+    const res = await fetch('/api/files', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-Id': DEMO_USER_ID,
+      },
+      body: JSON.stringify({
+        channelId: webChannel.id,
+        contextId: activeContextId ?? undefined,
+        fileName: file.name,
+        mimeType: file.type || 'application/octet-stream',
+        dataBase64,
+      }),
+    });
+
+    const data = await res.json();
+    if (!res.ok || !data?.file) {
+      throw new Error(data?.error || 'Upload failed');
+    }
+    return data.file as FileRecord;
+  };
+
+  const handleSelectFiles = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const selected = event.target.files ? Array.from(event.target.files) : [];
+    if (selected.length === 0) return;
+
+    setUploadingFiles(true);
+    setUploadError(null);
+    try {
+      const uploaded = await Promise.all(selected.map((file) => uploadFile(file)));
+      setComposerFiles((current) => [...current, ...uploaded]);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Upload failed';
+      setUploadError(errorMessage);
+    } finally {
+      setUploadingFiles(false);
+      event.target.value = '';
+    }
+  };
+
+  const removeComposerFile = (fileId: string) => {
+    setComposerFiles((current) => current.filter((file) => file.id !== fileId));
+  };
+
+  const downloadAttachment = async (attachment: MessageAttachment) => {
+    try {
+      const res = await fetch(`/api/files/${attachment.fileId}/content`, {
+        headers: { 'X-User-Id': DEMO_USER_ID },
+      });
+      if (!res.ok) {
+        throw new Error(`Download failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = attachment.fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Failed to download attachment:', err);
+      setUploadError('Could not download file. Please try again.');
+    }
+  };
+
   const handleSend = async () => {
-    if (!input.trim() || !webChannel || loading) return;
+    if ((!input.trim() && composerFiles.length === 0) || !webChannel || loading || uploadingFiles)
+      return;
 
     const content = input.trim();
+    const selectedFiles = [...composerFiles];
     setInput('');
     setLoading(true);
+    setUploadError(null);
     try {
-      const userId = '00000000-0000-0000-0000-000000000001';
       const res = await fetch('/api/messages', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-User-Id': userId,
+          'X-User-Id': DEMO_USER_ID,
         },
         body: JSON.stringify({
           channelId: webChannel.id,
           contextId: activeContextId ?? undefined,
           content,
+          fileIds: selectedFiles.map((file) => file.id),
         }),
       });
 
       const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || 'Failed to send message');
+      }
       if (data.message?.id) {
         setPendingReplyTo(data.message.id);
         setPendingSince(Date.now());
         pendingReplyToRef.current = data.message.id;
         pendingSinceRef.current = Date.now();
       }
+      setComposerFiles([]);
 
       await loadMessages();
     } catch (err) {
       setInput(content);
+      setComposerFiles(selectedFiles);
       console.error('Failed to send message:', err);
     } finally {
       setLoading(false);
@@ -369,48 +469,92 @@ export default function ChatPage() {
             </div>
           ) : (
             <div className="space-y-4">
-              {messages.map((message) => (
-                <div
-                  key={message.id}
-                  className={`flex ${message.direction === 'inbound' ? 'justify-end' : 'justify-start'}`}
-                >
+              {messages.map((message) => {
+                const attachments = extractAttachments(message.metadata);
+                return (
                   <div
-                    className={`flex max-w-[88%] items-start gap-2 sm:max-w-[80%] ${
-                      message.direction === 'inbound' ? 'flex-row-reverse' : ''
-                    }`}
+                    key={message.id}
+                    className={`flex ${message.direction === 'inbound' ? 'justify-end' : 'justify-start'}`}
                   >
-                    {message.direction !== 'inbound' ? (
-                      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-                        C
-                      </div>
-                    ) : null}
                     <div
-                      className={`w-fit rounded-2xl px-4 py-2 ${
-                        message.direction === 'inbound'
-                          ? 'rounded-tr-md bg-primary text-primary-foreground'
-                          : 'bg-muted text-foreground'
+                      className={`flex max-w-[88%] items-start gap-2 sm:max-w-[80%] ${
+                        message.direction === 'inbound' ? 'flex-row-reverse' : ''
                       }`}
                     >
-                      <p className="text-xs font-semibold uppercase tracking-wide opacity-70">
-                        {message.direction === 'inbound' ? 'You' : 'Clifford'}
-                      </p>
-                      <div className="mt-1 break-words">{renderMarkdown(message.content)}</div>
-                      {message.direction !== 'inbound' && extractRunId(message.metadata) ? (
-                        <RunVisualization runId={extractRunId(message.metadata)} />
+                      {message.direction !== 'inbound' ? (
+                        <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+                          C
+                        </div>
                       ) : null}
-                      <p
-                        className={`mt-1 text-xs ${
+                      <div
+                        className={`w-fit rounded-2xl px-4 py-2 ${
                           message.direction === 'inbound'
-                            ? 'text-primary-foreground/70'
-                            : 'text-muted-foreground'
+                            ? 'rounded-tr-md bg-primary text-primary-foreground'
+                            : 'bg-muted text-foreground'
                         }`}
                       >
-                        {new Date(message.createdAt).toLocaleTimeString()}
-                      </p>
+                        <p className="text-xs font-semibold uppercase tracking-wide opacity-70">
+                          {message.direction === 'inbound' ? 'You' : 'Clifford'}
+                        </p>
+                        {message.content.trim() ? (
+                          <div className="mt-1 break-words">{renderMarkdown(message.content)}</div>
+                        ) : null}
+                        {attachments.length > 0 ? (
+                          <div className="mt-2 space-y-2">
+                            {attachments.map((attachment) => (
+                              <div
+                                key={attachment.fileId}
+                                className={`rounded-lg border px-3 py-2 ${
+                                  message.direction === 'inbound'
+                                    ? 'border-primary-foreground/30 bg-primary-foreground/10'
+                                    : 'border-border bg-background/60'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-medium">{attachment.fileName}</p>
+                                    <p className="text-xs opacity-70">
+                                      {attachment.mimeType} • {formatBytes(attachment.sizeBytes)}
+                                    </p>
+                                    {attachment.summary ? (
+                                      <p className="mt-1 text-xs opacity-80">{attachment.summary}</p>
+                                    ) : null}
+                                  </div>
+                                  {!isInlineMediaType(attachment.mimeType) ? (
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-8 px-2"
+                                      onClick={() => downloadAttachment(attachment)}
+                                    >
+                                      <Download className="h-3.5 w-3.5" />
+                                    </Button>
+                                  ) : null}
+                                </div>
+                                {isInlineMediaType(attachment.mimeType) ? (
+                                  <InlineMediaPreview attachment={attachment} />
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                        {message.direction !== 'inbound' && extractRunId(message.metadata) ? (
+                          <RunVisualization runId={extractRunId(message.metadata)} />
+                        ) : null}
+                        <p
+                          className={`mt-1 text-xs ${
+                            message.direction === 'inbound'
+                              ? 'text-primary-foreground/70'
+                              : 'text-muted-foreground'
+                          }`}
+                        >
+                          {new Date(message.createdAt).toLocaleTimeString()}
+                        </p>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               {pendingReplyTo ? (
                 <div className="flex justify-start">
                   <div className="flex items-start gap-3">
@@ -447,19 +591,63 @@ export default function ChatPage() {
 
         {/* Input */}
         <div className="border-t border-border p-4">
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            multiple
+            onChange={handleSelectFiles}
+          />
+          {composerFiles.length > 0 ? (
+            <div className="mb-3 flex flex-wrap gap-2">
+              {composerFiles.map((file) => (
+                <div
+                  key={file.id}
+                  className="inline-flex items-center gap-2 rounded-md border border-border bg-muted/60 px-2 py-1 text-xs"
+                >
+                  <span className="max-w-[240px] truncate">
+                    {file.fileName} ({formatBytes(file.sizeBytes)})
+                  </span>
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-foreground"
+                    onClick={() => removeComposerFile(file.id)}
+                    aria-label={`Remove ${file.fileName}`}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {uploadError ? <p className="mb-2 text-xs text-destructive">{uploadError}</p> : null}
           <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={loading || uploadingFiles}
+            >
+              {uploadingFiles ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Paperclip className="h-4 w-4" />
+              )}
+            </Button>
             <textarea
               ref={inputRef}
               className="flex min-h-[38px] w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-              placeholder="Type a message..."
+              placeholder="Type a message or attach files..."
               rows={2}
               autoFocus
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              disabled={loading}
+              disabled={loading || uploadingFiles}
             />
-            <Button onClick={handleSend} disabled={loading || !input.trim()}>
+            <Button
+              onClick={handleSend}
+              disabled={loading || uploadingFiles || (!input.trim() && composerFiles.length === 0)}
+            >
               {loading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
@@ -467,6 +655,9 @@ export default function ChatPage() {
               )}
             </Button>
           </div>
+          {uploadingFiles ? (
+            <p className="mt-2 text-xs text-muted-foreground">Uploading files...</p>
+          ) : null}
         </div>
       </Card>
     </div>
@@ -481,4 +672,137 @@ function extractRunId(metadata?: string | null) {
   } catch {
     return '';
   }
+}
+
+function extractAttachments(metadata?: string | null): MessageAttachment[] {
+  if (!metadata) return [];
+  try {
+    const parsed = JSON.parse(metadata) as {
+      attachments?: Array<{
+        fileId?: string;
+        fileName?: string;
+        mimeType?: string;
+        sizeBytes?: number;
+        summary?: string | null;
+      }>;
+    };
+    if (!Array.isArray(parsed.attachments)) return [];
+    return parsed.attachments
+      .filter(
+        (attachment): attachment is Required<Pick<MessageAttachment, 'fileId' | 'fileName' | 'mimeType' | 'sizeBytes'>> &
+          Pick<MessageAttachment, 'summary'> =>
+          typeof attachment.fileId === 'string' &&
+          typeof attachment.fileName === 'string' &&
+          typeof attachment.mimeType === 'string' &&
+          typeof attachment.sizeBytes === 'number'
+      )
+      .map((attachment) => ({
+        fileId: attachment.fileId,
+        fileName: attachment.fileName,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.sizeBytes,
+        summary: attachment.summary ?? null,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      const base64 = result.includes(',') ? (result.split(',')[1] ?? '') : result;
+      resolve(base64);
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function isInlineMediaType(mimeType: string) {
+  return mimeType.startsWith('image/') || mimeType.startsWith('audio/');
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function InlineMediaPreview({ attachment }: { attachment: MessageAttachment }) {
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let localUrl: string | null = null;
+
+    const run = async () => {
+      try {
+        const res = await fetch(`/api/files/${attachment.fileId}/content`, {
+          headers: { 'X-User-Id': DEMO_USER_ID },
+        });
+        if (!res.ok) {
+          throw new Error(`Failed to load media (${res.status})`);
+        }
+        const blob = await res.blob();
+        localUrl = URL.createObjectURL(blob);
+        if (!cancelled) {
+          setObjectUrl(localUrl);
+          setError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setObjectUrl(null);
+          setError(err instanceof Error ? err.message : 'Failed to load media');
+        }
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+      if (localUrl) {
+        URL.revokeObjectURL(localUrl);
+      }
+    };
+  }, [attachment.fileId]);
+
+  if (error) {
+    return <p className="mt-2 text-xs text-destructive">{error}</p>;
+  }
+  if (!objectUrl) {
+    return (
+      <p className="mt-2 inline-flex items-center gap-1 text-xs opacity-70">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Loading preview...
+      </p>
+    );
+  }
+
+  if (attachment.mimeType.startsWith('image/')) {
+    return (
+      <img
+        src={objectUrl}
+        alt={attachment.fileName}
+        className="mt-2 max-h-64 w-full rounded-md object-contain"
+      />
+    );
+  }
+
+  if (attachment.mimeType.startsWith('audio/')) {
+    return <audio className="mt-2 w-full" controls src={objectUrl} preload="metadata" />;
+  }
+
+  return null;
 }

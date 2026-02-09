@@ -107,6 +107,11 @@ export class PolicyEngine {
       }
     }
 
+    // Check runKind (coordinator, subagent, etc.)
+    if (conditions.runKind && conditions.runKind !== ctx.runKind) {
+      return false;
+    }
+
     return true;
   }
 

@@ -25,7 +25,10 @@ const workerSpecs = [
   { queue: QUEUE_WAKE, processor: createWakeJob(logger) },
 ];
 
-const workers = workerSpecs.map(({ queue, processor }) => factory.createWorker(queue, processor));
+// Each worker spec has its own job payload type; widen to unknown for the heterogeneous array
+const workers = workerSpecs.map(({ queue, processor }) =>
+  factory.createWorker<unknown>(queue, processor as import('bullmq').Processor<unknown>)
+);
 
 for (const { queue } of workerSpecs) {
   logger.info(
