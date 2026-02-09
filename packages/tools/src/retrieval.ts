@@ -5,32 +5,58 @@ import { eq, and, sql } from 'drizzle-orm';
 import { generateEmbedding, chunkText } from '@clifford/core';
 
 const retrievalSearchArgs = z.object({
-  query: z.string().min(1).describe('Search query for semantic similarity'),
-  limit: z.number().int().min(1).max(50).optional().describe('Max results to return'),
+  query: z
+    .string()
+    .min(1)
+    .max(500)
+    .describe('Search query for semantic similarity. Max 500 characters. Natural language works best.'),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .optional()
+    .describe('Maximum results to return. Range: 1-50. Default: 10.'),
   scope: z
     .enum(['tenant', 'agent', 'user'])
     .optional()
-    .describe('Scope of search: tenant (all), agent (agent-specific), user (user-specific)'),
+    .describe(
+      'Search scope: "tenant" (all documents), "agent" (agent-specific), "user" (user-specific). Default: "agent".'
+    ),
 });
 
 const retrievalIndexArgs = z.object({
-  content: z.string().min(1).describe('Content to index'),
+  content: z
+    .string()
+    .min(1)
+    .max(100000)
+    .describe('Content to index. Max 100,000 characters. Will be automatically chunked.'),
   sourceType: z
     .enum(['file', 'url', 'memory', 'conversation', 'manual'])
-    .describe('Type of content source'),
-  sourceId: z.string().optional().describe('Original source identifier (path, URL, etc.)'),
-  metadata: z.record(z.unknown()).optional().describe('Additional metadata'),
+    .describe('Type of content source. Used for filtering and organization.'),
+  sourceId: z
+    .string()
+    .max(500)
+    .optional()
+    .describe('Original source identifier (file path, URL, etc.). Max 500 characters.'),
+  metadata: z
+    .record(z.unknown())
+    .optional()
+    .describe('Optional metadata object for filtering and context.'),
 });
 
 const retrievalDeleteArgs = z.object({
-  sourceId: z.string().describe('Source ID to delete chunks for'),
+  sourceId: z
+    .string()
+    .max(500)
+    .describe('Source ID to delete all chunks for. Must match sourceId used during indexing. Max 500 characters.'),
 });
 
 export const retrievalTool: ToolDef = {
   name: 'retrieval',
   shortDescription: 'Semantic search and document indexing for RAG',
   longDescription:
-    'Search indexed documents using semantic similarity, or index new documents for later retrieval. Uses vector embeddings for accurate semantic matching.',
+    'Vector-based semantic search and document indexing system. Use retrieval.index to chunk and embed documents for later search. Use retrieval.search to find semantically similar content using vector similarity (cosine distance). Powered by OpenAI text-embedding-3-small. Supports tenant/agent/user scopes. Use retrieval.delete to remove indexed content. Essential for Retrieval-Augmented Generation (RAG) workflows.',
   config: {
     fields: [
       {

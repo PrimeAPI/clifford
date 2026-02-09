@@ -5,7 +5,7 @@ export const systemTool: ToolDef = {
   name: 'system',
   shortDescription: 'System diagnostics and health checks',
   longDescription:
-    'System-level commands used to verify runtime availability and basic health signals.',
+    'Provides system-level diagnostic commands to verify runtime availability, check system health, and confirm the tool execution pipeline is functioning. Use this to test connectivity or debug tool execution issues.',
   pinned: true,
   config: {
     fields: [
@@ -41,7 +41,7 @@ export const systemTool: ToolDef = {
       name: 'ping',
       shortDescription: 'Check liveness and timestamp',
       longDescription:
-        'Responds with a pong and current timestamp to confirm runtime availability.',
+        'Responds with a pong and current timestamp to confirm runtime availability. Returns {ok: true, ts: "ISO-8601 timestamp"}. Use this to verify the tool execution system is working or measure round-trip latency. No arguments required.',
       usageExample: '{"name":"system.ping","args":{}}',
       argsSchema: z.object({}),
       classification: 'READ',

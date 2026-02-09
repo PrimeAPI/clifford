@@ -4,18 +4,38 @@ import { z } from 'zod';
 import { eq, and, desc, sql } from 'drizzle-orm';
 
 const memoryGetArgs = z.object({
-  key: z.string(),
+  key: z.string().min(1).max(255).describe('Memory key to retrieve. Max 255 characters.'),
 });
 
 const memoryPutArgs = z.object({
-  key: z.string(),
-  value: z.string(),
+  key: z
+    .string()
+    .min(1)
+    .max(255)
+    .describe('Memory key to store. Max 255 characters. Use descriptive keys like "user_timezone" or "project_name".'),
+  value: z
+    .string()
+    .max(10000)
+    .describe('Value to store. Max 10,000 characters. Can be any string data including JSON.'),
 });
 
 const memorySearchArgs = z.object({
-  query: z.string().min(1),
-  limit: z.number().int().min(1).max(50).optional(),
-  includeActive: z.boolean().optional(),
+  query: z
+    .string()
+    .min(1)
+    .max(200)
+    .describe('Search query string. Searches across module, key, and value fields. Max 200 characters.'),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .optional()
+    .describe('Maximum number of results to return. Range: 1-50. Default: 20.'),
+  includeActive: z
+    .boolean()
+    .optional()
+    .describe('Include memories already in active context (top 5 per level). Default: false.'),
 });
 
 const memorySessionsArgs = z.object({
@@ -33,7 +53,7 @@ export const memoryTool: ToolDef = {
   name: 'memory',
   shortDescription: 'Agent memory storage and retrieval',
   longDescription:
-    'Read/write key-value memory for the agent and search user memory items or past sessions.',
+    'Persistent key-value memory storage for the agent. Use memory.get/put for agent-specific data like user preferences or context. Use memory.search to find relevant user memories across conversations. Use memory.sessions to browse past conversation sessions and memory.session_messages to retrieve specific conversation history. Memory persists across runs and is scoped to tenant/agent.',
   pinned: true,
   config: {
     fields: [
@@ -88,13 +108,14 @@ export const memoryTool: ToolDef = {
     {
       name: 'get',
       shortDescription: 'Retrieve a stored memory value',
-      longDescription: 'Looks up a memory entry by key for the current tenant and agent context.',
-      usageExample: '{"name":"memory.get","args":{"key":"project_name"}}',
+      longDescription:
+        'Looks up a memory entry by key for the current tenant and agent context. Returns {success: true, key, value} if found, or {success: false, error: "Key not found"} if missing. Keys are case-sensitive. Use for retrieving user preferences, configuration, or contextual data stored by the agent.',
+      usageExample: '{"name":"memory.get","args":{"key":"user_timezone"}}',
       argsSchema: memoryGetArgs,
       classification: 'READ',
       handler: async (ctx: ToolContext, args: unknown) => {
         const { key } = memoryGetArgs.parse(args);
-        const db = getDb();
+        const db = ctx.db as ReturnType<typeof getDb>;
 
         const result = await db
           .select()
@@ -124,13 +145,14 @@ export const memoryTool: ToolDef = {
     {
       name: 'put',
       shortDescription: 'Store a memory value',
-      longDescription: 'Upserts a key-value pair for the current tenant and agent context.',
-      usageExample: '{"name":"memory.put","args":{"key":"project_name","value":"Clifford"}}',
+      longDescription:
+        'Upserts a key-value pair for the current tenant and agent context. Creates a new entry if the key does not exist, or updates the existing value if it does. Use this to persist user preferences, context across conversations, or agent state. Returns {success: true, key}. Keys are case-sensitive and should be descriptive (e.g., "user_timezone", "last_search_query").',
+      usageExample: '{"name":"memory.put","args":{"key":"user_timezone","value":"America/New_York"}}',
       argsSchema: memoryPutArgs,
       classification: 'WRITE',
       handler: async (ctx: ToolContext, args: unknown) => {
         const { key, value } = memoryPutArgs.parse(args);
-        const db = getDb();
+        const db = ctx.db as ReturnType<typeof getDb>;
 
         await db
           .insert(memoryKv)
@@ -158,8 +180,9 @@ export const memoryTool: ToolDef = {
       name: 'search',
       shortDescription: 'Search user memories',
       longDescription:
-        'Searches user memory items (not archived) by keyword across module, key, and value. By default excludes memories currently in the active context window (top 5 per level).',
-      usageExample: '{"name":"memory.search","args":{"query":"bremen","limit":10}}',
+        'Searches user memory items (not archived) by keyword across module, key, and value fields using case-insensitive pattern matching. By default excludes memories currently in the active context window (top 5 per level) to avoid redundancy. Returns matching memories with metadata: id, level, module, key, value, confidence, lastSeenAt. Use includeActive:true to search ALL memories. Limit range: 1-50 (default: 20). Useful for finding relevant context from past conversations.',
+      usageExample:
+        '{"name":"memory.search","args":{"query":"vacation","limit":10,"includeActive":false}}',
       argsSchema: memorySearchArgs,
       classification: 'READ',
       handler: async (ctx: ToolContext, args: unknown) => {
@@ -171,7 +194,7 @@ export const memoryTool: ToolDef = {
           search_limit?: number;
           include_active_default?: boolean;
         };
-        const db = getDb();
+        const db = ctx.db as ReturnType<typeof getDb>;
         const pattern = `%${query}%`;
         const match = sql<boolean>`(${memoryItems.value} ILIKE ${pattern} OR ${memoryItems.key} ILIKE ${pattern} OR ${memoryItems.module} ILIKE ${pattern})`;
 
@@ -215,7 +238,7 @@ export const memoryTool: ToolDef = {
           return { success: false, error: 'User context unavailable' };
         }
         const config = (ctx.toolConfig ?? {}) as { session_limit?: number };
-        const db = getDb();
+        const db = ctx.db as ReturnType<typeof getDb>;
         const rows = await db
           .select()
           .from(contexts)
@@ -249,7 +272,7 @@ export const memoryTool: ToolDef = {
         if (!ctx.userId) {
           return { success: false, error: 'User context unavailable' };
         }
-        const db = getDb();
+        const db = ctx.db as ReturnType<typeof getDb>;
         const rows = await db
           .select()
           .from(messages)

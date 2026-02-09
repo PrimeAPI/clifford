@@ -4,12 +4,31 @@ import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 
 const reminderSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  dueAt: z.string().datetime(),
-  repeats: z.boolean(),
-  repeatRule: z.string().optional(),
-  prompt: z.string(),
+  name: z
+    .string()
+    .min(1)
+    .max(200)
+    .describe('Unique reminder name/identifier. Max 200 characters. Example: "Weekly standup"'),
+  description: z
+    .string()
+    .max(1000)
+    .describe('Reminder description. Max 1000 characters.'),
+  dueAt: z
+    .string()
+    .datetime()
+    .describe('Due date/time in ISO-8601 format (YYYY-MM-DDTHH:mm:ssZ). Example: "2026-02-14T09:00:00Z"'),
+  repeats: z
+    .boolean()
+    .describe('Whether this reminder repeats after being triggered.'),
+  repeatRule: z
+    .string()
+    .max(100)
+    .optional()
+    .describe('Repeat pattern if repeats=true. Examples: "daily", "weekly", "monthly", "yearly". Max 100 characters.'),
+  prompt: z
+    .string()
+    .max(500)
+    .describe('Message to display when reminder triggers. Max 500 characters.'),
 });
 
 type Reminder = z.infer<typeof reminderSchema>;
@@ -21,20 +40,29 @@ const remindersSetArgs = z.object({
 });
 
 const remindersGetArgs = z.object({
-  name: z.string().optional(),
+  name: z
+    .string()
+    .max(200)
+    .optional()
+    .describe('Optional: Filter by specific reminder name. Returns all reminders if omitted.'),
 });
 
 const remindersUpdateArgs = z.object({
-  name: z.string(),
+  name: z
+    .string()
+    .max(200)
+    .describe('Name of the reminder to update. Max 200 characters.'),
   updates: reminderUpdatesSchema,
 });
 
 const remindersRemoveArgs = z.object({
-  name: z.string(),
+  name: z
+    .string()
+    .max(200)
+    .describe('Name of the reminder to remove. Max 200 characters.'),
 });
 
-async function loadReminderState(tenantId: string, agentId: string) {
-  const db = getDb();
+async function loadReminderState(db: ReturnType<typeof getDb>, tenantId: string, agentId: string) {
   const rows = await db
     .select()
     .from(memoryKv)
@@ -63,8 +91,7 @@ async function loadReminderState(tenantId: string, agentId: string) {
   return [] as Reminder[];
 }
 
-async function saveReminderState(tenantId: string, agentId: string, reminders: Reminder[]) {
-  const db = getDb();
+async function saveReminderState(db: ReturnType<typeof getDb>, tenantId: string, agentId: string, reminders: Reminder[]) {
   await db
     .insert(memoryKv)
     .values({
@@ -87,7 +114,7 @@ export const remindersTool: ToolDef = {
   name: 'reminders',
   shortDescription: 'Create and manage reminders',
   longDescription:
-    'Set, read, update, and remove reminders stored per tenant/agent. Uses in-memory storage backed by memory_kv.',
+    'Create, read, update, and delete reminders with due dates and repeat rules. Reminders are stored per tenant/agent in the memory_kv table. Each reminder has a name (unique identifier), description, dueAt timestamp (ISO-8601), optional repeat configuration, and a prompt to display when triggered. Use for scheduling future actions, recurring tasks, or time-based notifications. Supports up to 1000 reminders per agent (configurable).',
   config: {
     fields: [
       {
@@ -139,14 +166,15 @@ export const remindersTool: ToolDef = {
       handler: async (ctx, args) => {
         const { reminder } = remindersSetArgs.parse(args);
         const config = (ctx.toolConfig ?? {}) as { max_reminders?: number };
-        const list = await loadReminderState(ctx.tenantId, ctx.agentId);
+        const db = ctx.db as ReturnType<typeof getDb>;
+        const list = await loadReminderState(db, ctx.tenantId, ctx.agentId);
         const maxReminders = config.max_reminders ?? 100;
         if (list.length >= maxReminders && !list.find((item) => item.name === reminder.name)) {
           return { success: false, error: 'Reminder limit reached', maxReminders };
         }
         const filtered = list.filter((item) => item.name !== reminder.name);
         filtered.push(reminder);
-        await saveReminderState(ctx.tenantId, ctx.agentId, filtered);
+        await saveReminderState(db, ctx.tenantId, ctx.agentId, filtered);
         return { success: true, reminder };
       },
     },
@@ -159,7 +187,8 @@ export const remindersTool: ToolDef = {
       classification: 'READ',
       handler: async (ctx, args) => {
         const { name } = remindersGetArgs.parse(args);
-        const list = await loadReminderState(ctx.tenantId, ctx.agentId);
+        const db = ctx.db as ReturnType<typeof getDb>;
+        const list = await loadReminderState(db, ctx.tenantId, ctx.agentId);
         const reminders = name ? list.filter((item) => item.name === name) : list;
         return { success: true, reminders };
       },
@@ -174,7 +203,8 @@ export const remindersTool: ToolDef = {
       classification: 'WRITE',
       handler: async (ctx, args) => {
         const { name, updates } = remindersUpdateArgs.parse(args);
-        const list = await loadReminderState(ctx.tenantId, ctx.agentId);
+        const db = ctx.db as ReturnType<typeof getDb>;
+        const list = await loadReminderState(db, ctx.tenantId, ctx.agentId);
         let updated: Reminder | null = null;
         const next = list.map((item) => {
           if (item.name !== name) return item;
@@ -184,7 +214,7 @@ export const remindersTool: ToolDef = {
         if (!updated) {
           return { success: false, error: 'Reminder not found' };
         }
-        await saveReminderState(ctx.tenantId, ctx.agentId, next);
+        await saveReminderState(db, ctx.tenantId, ctx.agentId, next);
         return { success: true, reminder: updated };
       },
     },
@@ -197,12 +227,13 @@ export const remindersTool: ToolDef = {
       classification: 'DESTRUCT',
       handler: async (ctx, args) => {
         const { name } = remindersRemoveArgs.parse(args);
-        const list = await loadReminderState(ctx.tenantId, ctx.agentId);
+        const db = ctx.db as ReturnType<typeof getDb>;
+        const list = await loadReminderState(db, ctx.tenantId, ctx.agentId);
         const next = list.filter((item) => item.name !== name);
         if (next.length === list.length) {
           return { success: false, error: 'Reminder not found' };
         }
-        await saveReminderState(ctx.tenantId, ctx.agentId, next);
+        await saveReminderState(db, ctx.tenantId, ctx.agentId, next);
         return { success: true, name };
       },
     },

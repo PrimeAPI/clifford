@@ -3,16 +3,41 @@ import { z } from 'zod';
 
 const weatherGetArgs = z
   .object({
-    location: z.string().optional(),
-    region: z.string().optional(),
-    days: z.number().int().min(1).max(14).optional(),
+    location: z
+      .string()
+      .max(200)
+      .optional()
+      .describe('Location name (city, region). Max 200 characters. Example: "Bremen, Germany"'),
+    region: z
+      .string()
+      .max(200)
+      .optional()
+      .describe('Deprecated: use "location" instead. Max 200 characters.'),
+    days: z
+      .number()
+      .int()
+      .min(1)
+      .max(14)
+      .optional()
+      .describe('Number of forecast days to return. Range: 1-14. Default: 3.'),
     startDate: z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/)
-      .optional(),
-    timezone: z.string().optional(),
-    units: z.enum(['metric', 'imperial']).optional(),
-    includeHourly: z.boolean().optional(),
+      .optional()
+      .describe('Start date for forecast in YYYY-MM-DD format. Default: today.'),
+    timezone: z
+      .string()
+      .max(100)
+      .optional()
+      .describe('IANA timezone string (e.g., "America/New_York"). Default: auto-detected from location.'),
+    units: z
+      .enum(['metric', 'imperial'])
+      .optional()
+      .describe('Unit system: "metric" (Celsius, km/h) or "imperial" (Fahrenheit, mph). Default: metric.'),
+    includeHourly: z
+      .boolean()
+      .optional()
+      .describe('Include hourly forecast data in addition to daily. Default: false.'),
   })
   .refine((value) => value.location || value.region, {
     message: 'location is required',
@@ -66,7 +91,10 @@ function formatDateInTimezone(timezone: string) {
 }
 
 function addDays(isoDate: string, daysToAdd: number) {
-  const [year, month, day] = isoDate.split('-').map((value) => Number(value));
+  const parts = isoDate.split('-').map((value) => Number(value));
+  const year = parts[0] ?? 0;
+  const month = parts[1] ?? 0;
+  const day = parts[2] ?? 0;
   const date = new Date(Date.UTC(year, month - 1, day));
   date.setUTCDate(date.getUTCDate() + daysToAdd);
   return date.toISOString().slice(0, 10);
@@ -118,7 +146,30 @@ async function fetchWeather({
   endDate: string;
   units: 'metric' | 'imperial';
   includeHourly: boolean;
-}) {
+}): Promise<{
+  current?: {
+    time?: string;
+    temperature_2m?: number;
+    wind_speed_10m?: number;
+    precipitation?: number;
+    weather_code?: number;
+  };
+  daily?: {
+    time: string[];
+    temperature_2m_max?: number[];
+    temperature_2m_min?: number[];
+    precipitation_sum?: number[];
+    wind_speed_10m_max?: number[];
+    weather_code?: number[];
+  };
+  hourly?: {
+    time: string[];
+    temperature_2m?: number[];
+    wind_speed_10m?: number[];
+    precipitation?: number[];
+    weather_code?: number[];
+  };
+}> {
   const params = new URLSearchParams({
     latitude: location.latitude.toString(),
     longitude: location.longitude.toString(),
@@ -148,13 +199,37 @@ async function fetchWeather({
   if (!response.ok) {
     throw new Error(`Weather fetch failed: ${response.status}`);
   }
-  return response.json();
+  return (await response.json()) as {
+    current?: {
+      time?: string;
+      temperature_2m?: number;
+      wind_speed_10m?: number;
+      precipitation?: number;
+      weather_code?: number;
+    };
+    daily?: {
+      time: string[];
+      temperature_2m_max?: number[];
+      temperature_2m_min?: number[];
+      precipitation_sum?: number[];
+      wind_speed_10m_max?: number[];
+      weather_code?: number[];
+    };
+    hourly?: {
+      time: string[];
+      temperature_2m?: number[];
+      wind_speed_10m?: number[];
+      precipitation?: number[];
+      weather_code?: number[];
+    };
+  };
 }
 
 export const weatherTool: ToolDef = {
   name: 'weather',
-  shortDescription: 'Weather lookup with daily[] forecasts (days controls horizon)',
-  longDescription: 'Fetches current conditions and daily[] forecasts using Open-Meteo.',
+  shortDescription: 'Weather lookup with daily forecasts',
+  longDescription:
+    'Fetches current weather conditions and multi-day forecasts using Open-Meteo API (no API key required). Supports location search by city/region name with automatic geocoding. Returns current conditions plus daily forecast array. Use "days" parameter to control forecast horizon (1-14 days). Supports metric/imperial units, custom timezones, and optional hourly forecasts. Use for weather queries, travel planning, or contextual awareness.',
   config: {
     fields: [
       {
@@ -195,12 +270,10 @@ export const weatherTool: ToolDef = {
   commands: [
     {
       name: 'get',
-      shortDescription: 'Retrieve weather data (daily[] forecast)',
+      shortDescription: 'Retrieve weather data and forecast',
       longDescription:
-        'Returns current conditions plus daily[] forecast for the requested horizon. ' +
-        'Examples: weather.get({ "location": "Bremen, Germany", "days": 5 }) ' +
-        'and weather.get({ "location": "Berlin, DE", "days": 3, "includeHourly": true }).',
-      usageExample: '{"name":"weather.get","args":{"location":"Bremen, Germany","days":5}}',
+        'Returns current weather conditions plus daily forecast array for the specified location. Automatically geocodes location names (e.g., "Bremen, Germany"). Returns temperature, precipitation, wind speed, and weather codes with human-readable summaries. Use "days" (1-14) to control forecast length. Supports metric/imperial units and optional hourly data. Response includes location coordinates, timezone, and whether the forecast is partial. Example: weather.get({"location":"London","days":5}) returns 5-day forecast.',
+      usageExample: '{"name":"weather.get","args":{"location":"Bremen, Germany","days":5,"units":"metric"}}',
       argsSchema: weatherGetArgs,
       classification: 'READ',
       handler: async (ctx, args) => {
@@ -238,12 +311,12 @@ export const weatherTool: ToolDef = {
 
         const daily = data.daily.time.map((date: string, index: number) => ({
           date,
-          tempMin: data.daily.temperature_2m_min?.[index] ?? null,
-          tempMax: data.daily.temperature_2m_max?.[index] ?? null,
-          precipMm: data.daily.precipitation_sum?.[index] ?? null,
-          windKphMax: data.daily.wind_speed_10m_max?.[index] ?? null,
-          weatherCode: data.daily.weather_code?.[index] ?? null,
-          summary: summarizeWeatherCode(Number(data.daily.weather_code?.[index] ?? -1)),
+          tempMin: data.daily?.temperature_2m_min?.[index] ?? null,
+          tempMax: data.daily?.temperature_2m_max?.[index] ?? null,
+          precipMm: data.daily?.precipitation_sum?.[index] ?? null,
+          windKphMax: data.daily?.wind_speed_10m_max?.[index] ?? null,
+          weatherCode: data.daily?.weather_code?.[index] ?? null,
+          summary: summarizeWeatherCode(Number(data.daily?.weather_code?.[index] ?? -1)),
         }));
 
         const current = data.current
@@ -261,11 +334,11 @@ export const weatherTool: ToolDef = {
           parsed.includeHourly && data.hourly
             ? data.hourly.time.map((time: string, index: number) => ({
                 time,
-                temp: data.hourly.temperature_2m?.[index] ?? null,
-                windKph: data.hourly.wind_speed_10m?.[index] ?? null,
-                precipMm: data.hourly.precipitation?.[index] ?? null,
-                weatherCode: data.hourly.weather_code?.[index] ?? null,
-                summary: summarizeWeatherCode(Number(data.hourly.weather_code?.[index] ?? -1)),
+                temp: data.hourly?.temperature_2m?.[index] ?? null,
+                windKph: data.hourly?.wind_speed_10m?.[index] ?? null,
+                precipMm: data.hourly?.precipitation?.[index] ?? null,
+                weatherCode: data.hourly?.weather_code?.[index] ?? null,
+                summary: summarizeWeatherCode(Number(data.hourly?.weather_code?.[index] ?? -1)),
               }))
             : undefined;
 
