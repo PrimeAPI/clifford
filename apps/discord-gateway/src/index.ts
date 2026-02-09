@@ -125,7 +125,23 @@ client.on(Events.MessageCreate, async (message) => {
     ? message.content
     : message.content.replace(`<@${client.user?.id}>`, '').trim();
 
-  await message.channel.sendTyping();
+  if (!content.trim()) {
+    await message.reply('Please include a message after mentioning me.');
+    return;
+  }
+
+  if (!config.deliveryToken) {
+    await message.reply(
+      '⚠️ This bot is misconfigured: DELIVERY_TOKEN is missing, so I cannot deliver responses. Please ask the owner to configure it.'
+    );
+    return;
+  }
+
+  try {
+    await message.channel.sendTyping();
+  } catch (err) {
+    logger.warn({ err, channelId: message.channelId }, 'Failed to send typing indicator');
+  }
 
   if (isDM) {
     const lowerContent = content.trim().toLowerCase();
@@ -177,6 +193,14 @@ client.on(Events.MessageCreate, async (message) => {
       } else if (response.status === 404) {
         await message.reply(
           '⚠️ This bot is not configured to accept DMs yet. Please ask the owner to enable Discord DMs.'
+        );
+      } else if (response.status >= 500) {
+        await message.reply(
+          '❌ The backend failed while processing your message. Please try again shortly.'
+        );
+      } else {
+        await message.reply(
+          `❌ I could not process that message (HTTP ${response.status}). Please try again.`
         );
       }
     }

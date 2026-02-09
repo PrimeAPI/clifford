@@ -2586,31 +2586,120 @@ async function sendRunMessage({
   }
 
   if (channel.type === 'discord') {
-    let discordUserId: string | undefined;
-
-    const configValue = channel.config as { discordUserId?: string } | null;
-    if (configValue?.discordUserId) {
-      discordUserId = configValue.discordUserId;
-    }
+    const discordUserId = await resolveDiscordRecipientUserId({
+      db,
+      channelId,
+      contextId,
+      channelConfig: channel.config,
+    });
 
     if (!discordUserId) {
-      logger.warn({ channelId }, 'Discord user ID missing; cannot send DM');
+      const deliveryError =
+        'Discord recipient not found for this run. Set channel.config.discordUserId or ensure inbound metadata contains discordUserId.';
+
+      logger.warn({ channelId, outboundId }, deliveryError);
+
+      await db
+        .update(messages)
+        .set({
+          deliveryStatus: 'failed',
+          deliveryError,
+          deliveredAt: null,
+        })
+        .where(eq(messages.id, outboundId));
+
       return false;
     }
 
-    await enqueueDelivery({
-      type: 'delivery',
-      provider: 'discord',
-      messageId: outboundId,
-      payload: {
-        discordUserId,
-        content,
-      },
-    });
+    try {
+      await enqueueDelivery({
+        type: 'delivery',
+        provider: 'discord',
+        messageId: outboundId,
+        payload: {
+          discordUserId,
+          content,
+        },
+      });
+    } catch (err) {
+      const deliveryError = err instanceof Error ? err.message : String(err);
+
+      logger.error({ channelId, outboundId, err }, 'Failed to enqueue Discord delivery');
+
+      await db
+        .update(messages)
+        .set({
+          deliveryStatus: 'failed',
+          deliveryError,
+          deliveredAt: null,
+        })
+        .where(eq(messages.id, outboundId));
+
+      return false;
+    }
   }
 
   logger.info({ channelId, messageId: outboundId }, 'Run message sent');
   return true;
+}
+
+async function resolveDiscordRecipientUserId({
+  db,
+  channelId,
+  contextId,
+  channelConfig,
+}: {
+  db: ReturnType<typeof getDb>;
+  channelId: string;
+  contextId: string | null;
+  channelConfig: unknown;
+}): Promise<string | undefined> {
+  const configValue = (channelConfig ?? {}) as {
+    discordUserId?: unknown;
+    allowedDiscordUserIds?: unknown;
+  };
+
+  if (typeof configValue.discordUserId === 'string' && configValue.discordUserId.trim()) {
+    return configValue.discordUserId.trim();
+  }
+
+  if (
+    Array.isArray(configValue.allowedDiscordUserIds) &&
+    configValue.allowedDiscordUserIds.length === 1 &&
+    typeof configValue.allowedDiscordUserIds[0] === 'string' &&
+    configValue.allowedDiscordUserIds[0].trim()
+  ) {
+    return configValue.allowedDiscordUserIds[0].trim();
+  }
+
+  const inboundRows = await db
+    .select({
+      metadata: messages.metadata,
+    })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.channelId, channelId),
+        eq(messages.direction, 'inbound'),
+        contextId ? eq(messages.contextId, contextId) : isNull(messages.contextId)
+      )
+    )
+    .orderBy(desc(messages.createdAt))
+    .limit(10);
+
+  for (const row of inboundRows) {
+    if (!row.metadata) continue;
+    try {
+      const parsed = JSON.parse(row.metadata) as { discordUserId?: unknown };
+      if (typeof parsed.discordUserId === 'string' && parsed.discordUserId.trim()) {
+        return parsed.discordUserId.trim();
+      }
+    } catch {
+      // Ignore malformed metadata and continue scanning recent inbound rows.
+    }
+  }
+
+  return undefined;
 }
 
 async function loadConversation(
