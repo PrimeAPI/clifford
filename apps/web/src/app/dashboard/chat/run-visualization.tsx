@@ -15,6 +15,8 @@ type RunSummary = {
   outputText?: string | null;
   kind?: string | null;
   profile?: string | null;
+  contextId?: string | null;
+  allowedTools?: string[] | null;
   updatedAt?: string;
   wakeAt?: string | null;
   wakeReason?: string | null;
@@ -707,7 +709,9 @@ function useRunDetails(runId: string) {
           'X-Tenant-Id': '00000000-0000-0000-0000-000000000000',
         },
       });
+      if (!res.ok) return;
       const data = (await res.json()) as RunDetails;
+      if (!data?.run) return;
       const detailsSignature = [
         data.run.id,
         data.run.status,
@@ -769,6 +773,10 @@ export function RunVisualization({ runId }: { runId: string }) {
         ? `Tool result: ${latestStep.toolName ?? 'unknown'}`
         : latestStep.type
     : 'No steps yet';
+  const isThinking = details?.run.status
+    ? !['completed', 'failed', 'cancelled'].includes(details.run.status)
+    : false;
+  const showLiveStatus = loading || isThinking;
 
   const renderKeyValue = (label: string, value: unknown) => (
     <div className="flex flex-col gap-1">
@@ -878,10 +886,16 @@ export function RunVisualization({ runId }: { runId: string }) {
 
   return (
     <div className="mt-2">
-      <div className="flex items-center gap-2">
+      <div className="group flex items-center gap-2">
+        {showLiveStatus ? (
+          <div className="text-xs text-muted-foreground">
+            {loading ? 'Checking activity...' : 'Clifford is thinking'}
+          </div>
+        ) : null}
         <Button
-          variant="outline"
+          variant="ghost"
           size="sm"
+          className="h-7 px-2 text-xs sm:pointer-events-none sm:opacity-0 sm:transition-opacity sm:group-hover:pointer-events-auto sm:group-hover:opacity-100 sm:group-focus-within:pointer-events-auto sm:group-focus-within:opacity-100"
           onClick={() => {
             openDialog({ title: 'Task', kind: 'task', content: { runId } });
           }}
@@ -889,13 +903,15 @@ export function RunVisualization({ runId }: { runId: string }) {
           View task
         </Button>
       </div>
-      <div className="mt-2 text-xs text-muted-foreground">
-        {loading
-          ? 'Loading activity...'
-          : details
-            ? `Status: ${details.run.status} · Steps: ${details.steps.length} · Latest: ${latestLabel}`
-            : 'No activity yet.'}
-      </div>
+      {showLiveStatus ? (
+        <div className="mt-1 text-xs text-muted-foreground">
+          {loading
+            ? 'Loading activity...'
+            : details
+              ? `Status: ${details.run.status} · Steps: ${details.steps.length} · Latest: ${latestLabel}`
+              : 'No activity yet.'}
+        </div>
+      ) : null}
 
       {dialog ? (
         <div

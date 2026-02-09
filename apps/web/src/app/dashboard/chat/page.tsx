@@ -37,12 +37,19 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [pendingReplyTo, setPendingReplyTo] = useState<string | null>(null);
+  const [pendingSince, setPendingSince] = useState<number | null>(null);
   const [contexts, setContexts] = useState<ContextItem[]>([]);
   const [activeContextId, setActiveContextId] = useState<string | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastMessageIdRef = useRef<string | null>(null);
+  const pendingReplyToRef = useRef<string | null>(null);
+  const pendingSinceRef = useRef<number | null>(null);
   const activeContext = contexts.find((context) => context.id === activeContextId) ?? contexts[0];
+  const pendingRunId = pendingReplyTo
+    ? extractRunId(messages.find((message) => message.id === pendingReplyTo)?.metadata)
+    : '';
 
   const markdownComponents = useMemo(
     () => ({
@@ -101,6 +108,19 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  useEffect(() => {
+    if (initialLoading || !webChannel) return;
+    inputRef.current?.focus();
+  }, [initialLoading, webChannel]);
+
+  useEffect(() => {
+    pendingReplyToRef.current = pendingReplyTo;
+  }, [pendingReplyTo]);
+
+  useEffect(() => {
+    pendingSinceRef.current = pendingSince;
+  }, [pendingSince]);
+
   const loadWebChannel = async () => {
     try {
       const userId = '00000000-0000-0000-0000-000000000001';
@@ -127,12 +147,12 @@ export default function ChatPage() {
         headers: { 'X-User-Id': userId },
       });
       const data = await res.json();
-      const nextMessages = (data.messages || []).reverse();
+      const nextMessages: Message[] = (data.messages || []).reverse();
       setMessages((prev) => {
         if (prev.length !== nextMessages.length) return nextMessages;
         for (let i = 0; i < prev.length; i += 1) {
-          const prevMsg = prev[i];
-          const nextMsg = nextMessages[i];
+          const prevMsg = prev[i]!;
+          const nextMsg = nextMessages[i]!;
           if (
             prevMsg.id !== nextMsg.id ||
             prevMsg.content !== nextMsg.content ||
@@ -147,31 +167,40 @@ export default function ChatPage() {
         return prev;
       });
 
-      if (pendingReplyTo) {
+      const pendingReplyId = pendingReplyToRef.current;
+      const pendingStartedAt = pendingSinceRef.current;
+      if (pendingReplyId) {
         const hasReply = nextMessages.some((msg: Message) => {
           if (msg.direction !== 'outbound' || !msg.metadata) return false;
           try {
             const meta = JSON.parse(msg.metadata);
-            return meta?.replyTo === pendingReplyTo;
+            return meta?.replyTo === pendingReplyId;
           } catch {
             return false;
           }
         });
         let hasFallbackReply = false;
         if (!hasReply) {
-          const pendingMessage = nextMessages.find((msg) => msg.id === pendingReplyTo);
-          if (pendingMessage) {
-            const pendingTime = new Date(pendingMessage.createdAt).getTime();
-            hasFallbackReply = nextMessages.some(
-              (msg) =>
-                msg.direction === 'outbound' &&
-                new Date(msg.createdAt).getTime() >= pendingTime &&
-                msg.id !== pendingReplyTo
-            );
+          const pendingIndex = nextMessages.findIndex((msg) => msg.id === pendingReplyId);
+          if (pendingIndex >= 0) {
+            hasFallbackReply = nextMessages
+              .slice(pendingIndex + 1)
+              .some((msg) => msg.direction === 'outbound');
           }
         }
-        if (hasReply || hasFallbackReply) {
+        let hasTimeFallbackReply = false;
+        if (!hasReply && !hasFallbackReply && pendingStartedAt) {
+          hasTimeFallbackReply = nextMessages.some((msg) => {
+            if (msg.direction !== 'outbound') return false;
+            const messageTime = new Date(msg.createdAt).getTime();
+            return Number.isFinite(messageTime) && messageTime >= pendingStartedAt - 1000;
+          });
+        }
+        if (hasReply || hasFallbackReply || hasTimeFallbackReply) {
           setPendingReplyTo(null);
+          setPendingSince(null);
+          pendingReplyToRef.current = null;
+          pendingSinceRef.current = null;
         }
       }
     } catch (err) {
@@ -237,6 +266,8 @@ export default function ChatPage() {
   const handleSend = async () => {
     if (!input.trim() || !webChannel || loading) return;
 
+    const content = input.trim();
+    setInput('');
     setLoading(true);
     try {
       const userId = '00000000-0000-0000-0000-000000000001';
@@ -249,20 +280,25 @@ export default function ChatPage() {
         body: JSON.stringify({
           channelId: webChannel.id,
           contextId: activeContextId ?? undefined,
-          content: input,
+          content,
         }),
       });
 
       const data = await res.json();
       if (data.message?.id) {
         setPendingReplyTo(data.message.id);
+        setPendingSince(Date.now());
+        pendingReplyToRef.current = data.message.id;
+        pendingSinceRef.current = Date.now();
       }
 
       await loadMessages();
     } catch (err) {
+      setInput(content);
       console.error('Failed to send message:', err);
     } finally {
       setLoading(false);
+      inputRef.current?.focus();
     }
   };
 
@@ -336,20 +372,22 @@ export default function ChatPage() {
               {messages.map((message) => (
                 <div
                   key={message.id}
-                  className={`flex ${
-                    message.direction === 'inbound' ? 'justify-end' : 'justify-start'
-                  }`}
+                  className={`flex ${message.direction === 'inbound' ? 'justify-end' : 'justify-start'}`}
                 >
-                  <div className="flex items-start gap-3">
+                  <div
+                    className={`flex max-w-[88%] items-start gap-2 sm:max-w-[80%] ${
+                      message.direction === 'inbound' ? 'flex-row-reverse' : ''
+                    }`}
+                  >
                     {message.direction !== 'inbound' ? (
-                      <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">
+                      <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
                         C
                       </div>
                     ) : null}
                     <div
-                      className={`max-w-[70%] rounded-lg px-4 py-2 ${
+                      className={`w-fit rounded-2xl px-4 py-2 ${
                         message.direction === 'inbound'
-                          ? 'bg-primary text-primary-foreground'
+                          ? 'rounded-tr-md bg-primary text-primary-foreground'
                           : 'bg-muted text-foreground'
                       }`}
                     >
@@ -370,38 +408,34 @@ export default function ChatPage() {
                         {new Date(message.createdAt).toLocaleTimeString()}
                       </p>
                     </div>
-                    {message.direction === 'inbound' ? (
-                      <div className="flex h-9 w-9 items-center justify-center rounded-full bg-muted text-sm font-semibold text-foreground">
-                        U
-                      </div>
-                    ) : null}
                   </div>
                 </div>
               ))}
-              {pendingReplyTo && messages[messages.length - 1]?.direction === 'inbound' ? (
+              {pendingReplyTo ? (
                 <div className="flex justify-start">
                   <div className="flex items-start gap-3">
-                    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">
+                    <div className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
                       C
                     </div>
-                    <div className="max-w-[70%] rounded-lg bg-muted px-4 py-2 text-foreground">
+                    <div className="max-w-[80%] rounded-2xl rounded-tl-md bg-muted px-4 py-2 text-foreground">
                       <p className="text-xs font-semibold uppercase tracking-wide opacity-70">
                         Clifford
                       </p>
-                      <p className="mt-1 flex items-center gap-1 text-lg leading-none">
-                        <span className="animate-pulse">•</span>
-                        <span className="animate-pulse" style={{ animationDelay: '150ms' }}>
-                          •
+                      <p className="mt-1 inline-flex items-center gap-2 text-sm text-muted-foreground">
+                        <span className="inline-flex items-center gap-1">
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+                          <span
+                            className="h-1.5 w-1.5 animate-pulse rounded-full bg-current"
+                            style={{ animationDelay: '180ms' }}
+                          />
+                          <span
+                            className="h-1.5 w-1.5 animate-pulse rounded-full bg-current"
+                            style={{ animationDelay: '360ms' }}
+                          />
                         </span>
-                        <span className="animate-pulse" style={{ animationDelay: '300ms' }}>
-                          •
-                        </span>
+                        Clifford is thinking
                       </p>
-                      {messages[messages.length - 1] ? (
-                        <RunVisualization
-                          runId={extractRunId(messages[messages.length - 1]?.metadata)}
-                        />
-                      ) : null}
+                      {pendingRunId ? <RunVisualization runId={pendingRunId} /> : null}
                     </div>
                   </div>
                 </div>
@@ -415,9 +449,11 @@ export default function ChatPage() {
         <div className="border-t border-border p-4">
           <div className="flex gap-2">
             <textarea
+              ref={inputRef}
               className="flex min-h-[38px] w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               placeholder="Type a message..."
               rows={2}
+              autoFocus
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
