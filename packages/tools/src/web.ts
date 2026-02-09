@@ -454,6 +454,7 @@ export function clearWebCaches() {
 
 export const webTool: ToolDef = {
   name: 'web',
+  icon: 'globe',
   shortDescription: 'Web search, fetch, and content extraction',
   longDescription:
     'Search the web, fetch webpage content, and extract structured data from URLs. Use web.search to find information across the internet using Brave Search API (requires BRAVE_SEARCH_API env var). Use web.fetch to retrieve and parse webpage content in text, markdown, or HTML format. Use web.extract to pull specific data like links, images, or metadata from pages. Essential for accessing real-time information, documentation, news, and any web-based resources.',
@@ -471,6 +472,7 @@ export const webTool: ToolDef = {
         description: 'Default safe search level for web searches.',
         type: 'select',
         options: ['off', 'moderate', 'strict'],
+        defaultValue: 'moderate',
       },
       {
         key: 'max_fetch_size',
@@ -479,6 +481,7 @@ export const webTool: ToolDef = {
         type: 'number',
         min: 10000,
         max: 10000000,
+        defaultValue: 1000000,
       },
       {
         key: 'timeout',
@@ -487,6 +490,7 @@ export const webTool: ToolDef = {
         type: 'number',
         min: 1,
         max: 30,
+        defaultValue: 10,
       },
       {
         key: 'max_retries',
@@ -495,12 +499,14 @@ export const webTool: ToolDef = {
         type: 'number',
         min: 0,
         max: 5,
+        defaultValue: 3,
       },
       {
         key: 'expose_errors',
         label: 'Expose Errors',
         description: 'Include tool error details in user-facing messages.',
         type: 'boolean',
+        defaultValue: false,
       },
     ],
     schema: z.object({

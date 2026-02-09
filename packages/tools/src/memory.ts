@@ -51,6 +51,7 @@ const MEMORY_PER_LEVEL_LIMIT = 5;
 
 export const memoryTool: ToolDef = {
   name: 'memory',
+  icon: 'brain',
   shortDescription: 'Agent memory storage and retrieval',
   longDescription:
     'Persistent key-value memory storage for the agent. Use memory.get/put for agent-specific data like user preferences or context. Use memory.search to find relevant user memories across conversations. Use memory.sessions to browse past conversation sessions and memory.session_messages to retrieve specific conversation history. Memory persists across runs and is scoped to tenant/agent.',
@@ -64,12 +65,14 @@ export const memoryTool: ToolDef = {
         type: 'number',
         min: 1,
         max: 50,
+        defaultValue: 20,
       },
       {
         key: 'include_active_default',
         label: 'Include Active Memories',
         description: 'Include memories already in the active context window by default.',
         type: 'boolean',
+        defaultValue: false,
       },
       {
         key: 'session_limit',
@@ -78,6 +81,7 @@ export const memoryTool: ToolDef = {
         type: 'number',
         min: 1,
         max: 50,
+        defaultValue: 20,
       },
       {
         key: 'max_retries',
@@ -86,12 +90,14 @@ export const memoryTool: ToolDef = {
         type: 'number',
         min: 0,
         max: 5,
+        defaultValue: 3,
       },
       {
         key: 'expose_errors',
         label: 'Expose Errors',
         description: 'Include tool error details in user-facing messages.',
         type: 'boolean',
+        defaultValue: false,
       },
     ],
     schema: z.object({

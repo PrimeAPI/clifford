@@ -16,6 +16,7 @@ function requireResolver(resolver?: ToolResolver) {
 
 export const toolsTool: ToolDef = {
   name: 'tools',
+  icon: 'wrench',
   shortDescription: 'Tool discovery and descriptions',
   longDescription: 'List available tools and fetch detailed descriptions for a specific tool.',
   pinned: true,
@@ -28,6 +29,7 @@ export const toolsTool: ToolDef = {
         type: 'number',
         min: 1,
         max: 100,
+        defaultValue: 100,
       },
       {
         key: 'max_retries',
@@ -36,12 +38,14 @@ export const toolsTool: ToolDef = {
         type: 'number',
         min: 0,
         max: 5,
+        defaultValue: 3,
       },
       {
         key: 'expose_errors',
         label: 'Expose Errors',
         description: 'Include tool error details in user-facing messages.',
         type: 'boolean',
+        defaultValue: false,
       },
     ],
     schema: z.object({

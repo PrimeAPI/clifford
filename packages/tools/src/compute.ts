@@ -177,6 +177,7 @@ function safeEval(expression: string): number {
 
 export const computeTool: ToolDef = {
   name: 'compute',
+  icon: 'calculator',
   shortDescription: 'Perform arithmetic calculations',
   longDescription:
     'Deterministic math operations: average, sum, min, max, median, round, percentage, and expression evaluation. Use this instead of mental math for any numeric computation.',

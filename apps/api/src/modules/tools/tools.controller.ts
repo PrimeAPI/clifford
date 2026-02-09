@@ -1,8 +1,33 @@
 import type { FastifyInstance } from 'fastify';
 import { getDb, userToolSettings } from '@clifford/db';
 import { and, eq } from 'drizzle-orm';
+import type { ToolActivationStatus, ToolCatalogEntry } from '@clifford/sdk';
 import { updateToolSchema } from './tools.schema.js';
 import { loadAllTools } from './tools.service.js';
+
+function getActivationStatus(
+  fields: Array<{
+    key: string;
+    required?: boolean;
+    defaultValue?: string | number | boolean;
+  }>,
+  config: Record<string, unknown>
+): ToolActivationStatus {
+  const missingRequiredFields = fields
+    .filter((field) => {
+      if (!field.required) return false;
+      const hasValue = config[field.key] !== undefined && config[field.key] !== null && config[field.key] !== '';
+      const hasDefault = field.defaultValue !== undefined;
+      return !hasValue && !hasDefault;
+    })
+    .map((field) => field.key);
+
+  return {
+    requiresConfiguration: missingRequiredFields.length > 0,
+    canActivate: missingRequiredFields.length === 0,
+    missingRequiredFields,
+  };
+}
 
 export async function toolRoutes(app: FastifyInstance) {
   app.get('/api/tools', async (req, reply) => {
@@ -19,21 +44,33 @@ export async function toolRoutes(app: FastifyInstance) {
 
     const settingsMap = new Map(settings.map((row) => [row.toolName, row]));
     const hasUserSettings = settings.length > 0;
-    const tools = loadAllTools().map((tool) => {
+    const tools: ToolCatalogEntry[] = loadAllTools().map((tool) => {
       const setting = settingsMap.get(tool.name);
+      const config = (setting?.config ?? {}) as Record<string, unknown>;
+      const configFields = tool.config?.fields ?? [];
+      const activation = getActivationStatus(configFields, config);
+      const enabled = activation.canActivate ? (setting?.enabled ?? true) : false;
+      const pinned = enabled
+        ? (setting?.pinned ?? (hasUserSettings ? false : (tool.pinned ?? false)))
+        : false;
+      const important = enabled
+        ? (setting?.important ?? (hasUserSettings ? false : (tool.important ?? false)))
+        : false;
       return {
         name: tool.name,
+        icon: tool.icon,
         shortDescription: tool.shortDescription,
         longDescription: tool.longDescription,
         commands: tool.commands.map((command) => ({
           name: command.name,
           shortDescription: command.shortDescription,
         })),
-        configFields: tool.config?.fields ?? [],
-        enabled: setting?.enabled ?? true,
-        pinned: setting?.pinned ?? (hasUserSettings ? false : (tool.pinned ?? false)),
-        important: setting?.important ?? (hasUserSettings ? false : (tool.important ?? false)),
-        config: setting?.config ?? {},
+        configFields,
+        activation,
+        enabled,
+        pinned,
+        important,
+        config,
       };
     });
 
@@ -62,6 +99,24 @@ export async function toolRoutes(app: FastifyInstance) {
     }
 
     const db = getDb();
+    const existing = await db
+      .select()
+      .from(userToolSettings)
+      .where(and(eq(userToolSettings.userId, userId), eq(userToolSettings.toolName, name)))
+      .limit(1);
+    const existingRow = existing[0];
+    const mergedConfig = {
+      ...((existingRow?.config ?? {}) as Record<string, unknown>),
+      ...(body.config ?? {}),
+    };
+    const activation = getActivationStatus(tool.config?.fields ?? [], mergedConfig);
+    const nextEnabled = body.enabled ?? existingRow?.enabled ?? true;
+    if (nextEnabled && !activation.canActivate) {
+      return reply.status(400).send({
+        error: 'Configuration required before enabling this tool',
+        missingRequiredFields: activation.missingRequiredFields,
+      });
+    }
 
     if (body.pinned === true) {
       await db

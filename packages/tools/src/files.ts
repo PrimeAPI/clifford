@@ -297,6 +297,7 @@ async function extractFileText(file: typeof userFiles.$inferSelect, config: Requ
 
 export const filesTool: ToolDef = {
   name: 'files',
+  icon: 'file-text',
   shortDescription: 'User file index, search, and metadata operations',
   longDescription:
     'Manage and query user-uploaded files. Use files.list and files.search to find files. Use files.get for details, files.read_text to retrieve indexed or parser-extracted text (including PDF/Office via officeparser), and files.update_summary to store a concise summary that improves retrieval quality.',
@@ -307,6 +308,7 @@ export const filesTool: ToolDef = {
         label: 'Extraction Enabled',
         description: 'Allow files.read_text to parse files when no indexed text exists.',
         type: 'boolean',
+        defaultValue: true,
       },
       {
         key: 'extraction_strategy',
@@ -314,6 +316,7 @@ export const filesTool: ToolDef = {
         description: 'Choose parser strategy for files.read_text.',
         type: 'select',
         options: ['auto', 'text_only', 'officeparser_only'],
+        defaultValue: 'auto',
       },
       {
         key: 'extraction_max_chars',
@@ -322,12 +325,14 @@ export const filesTool: ToolDef = {
         type: 'number',
         min: 100,
         max: 200000,
+        defaultValue: 3000,
       },
       {
         key: 'persist_extracted_text',
         label: 'Persist Extracted Text',
         description: 'Store newly extracted text back into DB for faster future reads.',
         type: 'boolean',
+        defaultValue: true,
       },
       {
         key: 'officeparser_timeout_ms',
@@ -336,12 +341,14 @@ export const filesTool: ToolDef = {
         type: 'number',
         min: 1000,
         max: 120000,
+        defaultValue: 20000,
       },
       {
         key: 'allow_binary_fallback',
         label: 'Allow Binary Fallback',
         description: 'Attempt UTF-8 fallback for unsupported binary files.',
         type: 'boolean',
+        defaultValue: false,
       },
     ],
     schema: z.object({

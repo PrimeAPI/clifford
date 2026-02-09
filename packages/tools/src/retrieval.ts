@@ -54,6 +54,7 @@ const retrievalDeleteArgs = z.object({
 
 export const retrievalTool: ToolDef = {
   name: 'retrieval',
+  icon: 'database',
   shortDescription: 'Semantic search and document indexing for RAG',
   longDescription:
     'Vector-based semantic search and document indexing system. Use retrieval.index to chunk and embed documents for later search. Use retrieval.search to find semantically similar content using vector similarity (cosine distance). Powered by OpenAI text-embedding-3-small. Supports tenant/agent/user scopes. Use retrieval.delete to remove indexed content. Essential for Retrieval-Augmented Generation (RAG) workflows.',
@@ -73,6 +74,7 @@ export const retrievalTool: ToolDef = {
         type: 'number',
         min: 100,
         max: 2000,
+        defaultValue: 512,
       },
       {
         key: 'chunk_overlap',
@@ -81,6 +83,7 @@ export const retrievalTool: ToolDef = {
         type: 'number',
         min: 0,
         max: 200,
+        defaultValue: 50,
       },
     ],
     schema: z.object({

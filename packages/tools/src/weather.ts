@@ -227,6 +227,7 @@ async function fetchWeather({
 
 export const weatherTool: ToolDef = {
   name: 'weather',
+  icon: 'cloud-sun',
   shortDescription: 'Weather lookup with daily forecasts',
   longDescription:
     'Fetches current weather conditions and multi-day forecasts using Open-Meteo API (no API key required). Supports location search by city/region name with automatic geocoding. Returns current conditions plus daily forecast array. Use "days" parameter to control forecast horizon (1-14 days). Supports metric/imperial units, custom timezones, and optional hourly forecasts. Use for weather queries, travel planning, or contextual awareness.',
@@ -244,6 +245,7 @@ export const weatherTool: ToolDef = {
         description: 'Preferred units for weather data.',
         type: 'select',
         options: ['metric', 'imperial'],
+        defaultValue: 'metric',
       },
       {
         key: 'max_retries',
@@ -252,12 +254,14 @@ export const weatherTool: ToolDef = {
         type: 'number',
         min: 0,
         max: 5,
+        defaultValue: 3,
       },
       {
         key: 'expose_errors',
         label: 'Expose Errors',
         description: 'Include tool error details in user-facing messages.',
         type: 'boolean',
+        defaultValue: false,
       },
     ],
     schema: z.object({

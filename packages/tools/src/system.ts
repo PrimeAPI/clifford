@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 export const systemTool: ToolDef = {
   name: 'system',
+  icon: 'shield-check',
   shortDescription: 'System diagnostics and health checks',
   longDescription:
     'Provides system-level diagnostic commands to verify runtime availability, check system health, and confirm the tool execution pipeline is functioning. Use this to test connectivity or debug tool execution issues.',
@@ -14,6 +15,7 @@ export const systemTool: ToolDef = {
         label: 'Allow Ping',
         description: 'If false, system.ping will return an error.',
         type: 'boolean',
+        defaultValue: true,
       },
       {
         key: 'max_retries',
@@ -22,12 +24,14 @@ export const systemTool: ToolDef = {
         type: 'number',
         min: 0,
         max: 5,
+        defaultValue: 3,
       },
       {
         key: 'expose_errors',
         label: 'Expose Errors',
         description: 'Include tool error details in user-facing messages.',
         type: 'boolean',
+        defaultValue: false,
       },
     ],
     schema: z.object({

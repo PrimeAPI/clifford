@@ -21,6 +21,7 @@ export interface ToolConfigField {
   description: string;
   type: ToolConfigFieldType;
   required?: boolean;
+  defaultValue?: string | number | boolean;
   options?: string[];
   min?: number;
   max?: number;
@@ -33,6 +34,7 @@ export interface ToolConfigDef {
 
 export interface ToolDef {
   name: string;
+  icon?: string;
   shortDescription: string;
   longDescription: string;
   pinned?: boolean;
@@ -40,6 +42,26 @@ export interface ToolDef {
   config?: ToolConfigDef;
   completeRequirement?: string;
   commands: ToolCommandDef[];
+}
+
+export interface ToolActivationStatus {
+  requiresConfiguration: boolean;
+  canActivate: boolean;
+  missingRequiredFields: string[];
+}
+
+export interface ToolCatalogEntry {
+  name: string;
+  icon?: string;
+  shortDescription: string;
+  longDescription: string;
+  commands: Array<{ name: string; shortDescription: string }>;
+  configFields: ToolConfigField[];
+  activation: ToolActivationStatus;
+  enabled: boolean;
+  pinned: boolean;
+  important: boolean;
+  config: Record<string, unknown>;
 }
 
 export type ToolCommandHandler = (ctx: ToolContext, args: unknown) => Promise<unknown>;

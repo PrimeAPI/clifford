@@ -112,6 +112,7 @@ async function saveReminderState(db: ReturnType<typeof getDb>, tenantId: string,
 
 export const remindersTool: ToolDef = {
   name: 'reminders',
+  icon: 'bell',
   shortDescription: 'Create and manage reminders',
   longDescription:
     'Create, read, update, and delete reminders with due dates and repeat rules. Reminders are stored per tenant/agent in the memory_kv table. Each reminder has a name (unique identifier), description, dueAt timestamp (ISO-8601), optional repeat configuration, and a prompt to display when triggered. Use for scheduling future actions, recurring tasks, or time-based notifications. Supports up to 1000 reminders per agent (configurable).',
@@ -130,6 +131,7 @@ export const remindersTool: ToolDef = {
         type: 'number',
         min: 1,
         max: 1000,
+        defaultValue: 100,
       },
       {
         key: 'max_retries',
@@ -138,12 +140,14 @@ export const remindersTool: ToolDef = {
         type: 'number',
         min: 0,
         max: 5,
+        defaultValue: 3,
       },
       {
         key: 'expose_errors',
         label: 'Expose Errors',
         description: 'Include tool error details in user-facing messages.',
         type: 'boolean',
+        defaultValue: false,
       },
     ],
     schema: z.object({
