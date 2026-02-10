@@ -38,4 +38,7 @@ export const config = {
   memoryMinConfidence: parseFloat(process.env.MEMORY_MIN_CONFIDENCE || '0.3'),
   memoryMaxItems: parseInt(process.env.MEMORY_MAX_ITEMS || '15', 10),
   memorySkipForWebQA: process.env.MEMORY_SKIP_WEB_QA !== 'false',
+  ragEnabled: process.env.RAG_ENABLED !== 'false',
+  ragMaxChunks: parseInt(process.env.RAG_MAX_CHUNKS || '5', 10),
+  ragMinSimilarity: parseFloat(process.env.RAG_MIN_SIMILARITY || '0.3'),
 };

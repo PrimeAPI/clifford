@@ -22,8 +22,9 @@ import {
   triggers,
   agents,
   userFiles,
+  documentChunks,
 } from '@clifford/db';
-import { eq, and, desc, inArray, isNull } from 'drizzle-orm';
+import { eq, and, desc, inArray, isNull, sql } from 'drizzle-orm';
 import { PolicyEngine, createBudgetState, type BudgetState } from '@clifford/policy';
 import { ToolRegistry } from './tool-registry.js';
 import { nanoid } from 'nanoid';
@@ -32,6 +33,7 @@ import {
   decryptSecret,
   normalizeModelRoutingPolicy,
   DEFAULT_MODEL_ROUTING_CONFIG,
+  generateEmbedding,
 } from '@clifford/core';
 import {
   callOpenAIWithFallback,
@@ -464,6 +466,14 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
       run.inputText,
       conversation.length > 0
     );
+    const knowledge = await loadRelevantKnowledge(
+      db,
+      tenantId,
+      agentId,
+      run.inputText,
+      apiKey,
+      logger
+    );
     const priorSpawnSignatures = await loadPriorSpawnSignatures(db, runId);
 
     const commitUserVisibleMessage = async (message: string, reason: string, fileIds?: string[]) => {
@@ -783,6 +793,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         profile: run.profile ?? null,
         input: run.inputJson ?? null,
         memories,
+        knowledge: iteration === 0 ? knowledge : [],
         agentLevel,
       };
 
@@ -2402,6 +2413,74 @@ async function loadCoreMemories(
     contextId: item.contextId,
     pinned: item.pinned,
   }));
+}
+
+interface KnowledgeChunk {
+  content: string;
+  sourceType: string;
+  sourceId: string | null;
+  similarity: number;
+}
+
+async function loadRelevantKnowledge(
+  db: ReturnType<typeof getDb>,
+  tenantId: string,
+  agentId: string,
+  inputText: string,
+  apiKey: string,
+  logger: Logger
+): Promise<KnowledgeChunk[]> {
+  if (!config.ragEnabled || !inputText.trim()) {
+    return [];
+  }
+
+  try {
+    const { embedding } = await generateEmbedding(inputText, { apiKey });
+    const embeddingStr = `[${embedding.join(',')}]`;
+
+    const scopeCondition = and(
+      eq(documentChunks.tenantId, tenantId),
+      eq(documentChunks.agentId, agentId)
+    );
+
+    const results = (await db.execute(sql`
+      SELECT
+        content,
+        source_type,
+        source_id,
+        1 - (embedding <=> ${embeddingStr}::vector) as similarity
+      FROM document_chunks
+      WHERE ${scopeCondition}
+        AND embedding IS NOT NULL
+      ORDER BY embedding <=> ${embeddingStr}::vector
+      LIMIT ${config.ragMaxChunks}
+    `)) as unknown as {
+      rows: Array<{
+        content: string;
+        source_type: string;
+        source_id: string | null;
+        similarity: number;
+      }>;
+    };
+
+    const chunks = results.rows
+      .filter((row) => row.similarity >= config.ragMinSimilarity)
+      .map((row) => ({
+        content: row.content,
+        sourceType: row.source_type,
+        sourceId: row.source_id,
+        similarity: row.similarity,
+      }));
+
+    if (chunks.length > 0) {
+      logger.info({ count: chunks.length, topSimilarity: chunks[0]?.similarity }, 'Passive RAG loaded knowledge chunks');
+    }
+
+    return chunks;
+  } catch (err) {
+    logger.warn({ err }, 'Passive RAG retrieval failed (non-fatal)');
+    return [];
+  }
 }
 
 async function loadPriorSpawnSignatures(db: ReturnType<typeof getDb>, runId: string) {

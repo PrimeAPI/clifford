@@ -10,6 +10,7 @@ export interface UserPayloadInput {
   profile: string | null;
   input: object | null;
   memories: unknown[];
+  knowledge: Array<{ content: string; sourceType: string; sourceId: string | null; similarity: number }>;
   agentLevel: number;
 }
 
@@ -41,6 +42,22 @@ export function encodeUserPayload(payload: UserPayloadInput): string {
   sections.push(`runKind: ${payload.runKind}`);
   sections.push(`profile: ${payload.profile ?? 'null'}`);
   sections.push(`agentLevel: ${payload.agentLevel}`);
+
+  // Knowledge section (passive RAG results)
+  if (payload.knowledge && payload.knowledge.length > 0) {
+    sections.push('');
+    sections.push('## Knowledge');
+    sections.push('');
+    for (const chunk of payload.knowledge) {
+      const source = chunk.sourceId
+        ? `${chunk.sourceType}: ${chunk.sourceId}`
+        : chunk.sourceType;
+      sections.push(`### ${source} (similarity: ${chunk.similarity.toFixed(2)})`);
+      sections.push('');
+      sections.push(chunk.content);
+      sections.push('');
+    }
+  }
 
   // Conversation section
   if (payload.conversation.length > 0) {
