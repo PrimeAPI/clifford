@@ -186,6 +186,9 @@ export async function callOpenAIStructuredWithFallback<T>(
 
 // Models that support structured outputs (json_schema response format)
 const STRUCTURED_OUTPUT_MODELS = new Set([
+  'gpt-5',
+  'gpt-5-mini',
+  'gpt-5-nano',
   'gpt-4o',
   'gpt-4o-2024-08-06',
   'gpt-4o-2024-11-20',

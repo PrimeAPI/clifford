@@ -28,7 +28,11 @@ import { PolicyEngine, createBudgetState, type BudgetState } from '@clifford/pol
 import { ToolRegistry } from './tool-registry.js';
 import { nanoid } from 'nanoid';
 import { config } from './config.js';
-import { decryptSecret } from '@clifford/core';
+import {
+  decryptSecret,
+  normalizeModelRoutingPolicy,
+  DEFAULT_MODEL_ROUTING_CONFIG,
+} from '@clifford/core';
 import {
   callOpenAIWithFallback,
   callOpenAIStructuredWithFallback,
@@ -38,7 +42,7 @@ import {
 import { ZodError } from 'zod';
 import { enqueueDelivery, enqueueRun } from './queues.js';
 import { randomUUID } from 'crypto';
-import { ModelRouter, createRoutingConfig, type RoutingConfig } from './model-router.js';
+import { ModelRouter, type RoutingConfig } from './model-router.js';
 import { classifyTask, type TaskType } from './task-classifier.js';
 import { encodeUserPayload, buildSystemPromptMarkdown } from '@clifford/toon';
 import { decideUserMessageCommit } from './message-commit-gate.js';
@@ -250,8 +254,8 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
     }
 
     const provider = settings.llmProvider || 'openai';
-    const model = settings.llmModel || 'gpt-4o-mini';
-    const fallbackModel = settings.llmFallbackModel || null;
+    const preferredModel = settings.llmModel || DEFAULT_MODEL_ROUTING_CONFIG.executor.model;
+    const preferredFallback = settings.llmFallbackModel || null;
 
     if (provider !== 'openai') {
       throw new Error(`Unsupported LLM provider: ${provider}`);
@@ -259,14 +263,36 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
     // 6. Load routing configuration (from agent or user settings)
     const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
-    const routingConfig: RoutingConfig | null =
-      (agent?.routingConfig as RoutingConfig | null) ??
-      (settings.routingConfig as RoutingConfig | null) ??
-      null;
+    const routingDefaults = {
+      planner: {
+        ...DEFAULT_MODEL_ROUTING_CONFIG.planner,
+        model: preferredModel,
+        fallbackModel: preferredFallback,
+      },
+      executor: {
+        ...DEFAULT_MODEL_ROUTING_CONFIG.executor,
+        model: preferredModel,
+        fallbackModel: preferredFallback,
+      },
+      verifier: {
+        ...DEFAULT_MODEL_ROUTING_CONFIG.verifier,
+        model: preferredModel,
+        fallbackModel: preferredFallback,
+      },
+    };
+    const userRoutingPolicy = normalizeModelRoutingPolicy(settings.routingConfig, routingDefaults);
+    const agentRoutingPolicy = agent?.routingConfig
+      ? normalizeModelRoutingPolicy(agent.routingConfig, routingDefaults)
+      : null;
+    const routingConfig: RoutingConfig =
+      (agentRoutingPolicy?.active as RoutingConfig | undefined) ??
+      (userRoutingPolicy.active as RoutingConfig);
+    const autoSelectLowestCost = agentRoutingPolicy?.autoSelectLowestCost ?? userRoutingPolicy.autoSelectLowestCost;
+    const enabledModelIds = agentRoutingPolicy?.enabledModelIds ?? userRoutingPolicy.enabledModelIds;
 
-    // Create model router if routing config is available
-    const modelRouter = routingConfig ? new ModelRouter(apiKey, routingConfig) : null;
+    const modelRouter = new ModelRouter(apiKey, routingConfig, autoSelectLowestCost, enabledModelIds);
     let currentTaskType: TaskType = 'plan';
+    let previousCommandForRouting: { type: string; category?: string } | undefined;
 
     const toolDescriptions = buildToolPrompt(toolRegistry.getAllTools(), run.kind ?? 'coordinator');
 
@@ -396,14 +422,15 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           { role: 'system', content: validationSystemPrompt },
           { role: 'user', content: validationUserPrompt },
         ];
+        const validationSpec = modelRouter.getSpec('verify');
         budgetState.tokensUsed += estimateMessagesTokens(validationMessages);
         budgetState.timeUsedMs = Date.now() - runStartMs;
         responseText = await callOpenAIWithFallback(
           apiKey,
-          model,
-          fallbackModel,
+          validationSpec.model,
+          validationSpec.fallbackModel ?? null,
           validationMessages,
-          { temperature: 0 }
+          { temperature: validationSpec.temperature ?? 0 }
         );
         budgetState.tokensUsed += Math.max(1, Math.ceil(responseText.length / 4));
       } catch {
@@ -759,12 +786,22 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         agentLevel,
       };
 
+      const hasToolCalls = transcript.some((entry) => entry.type === 'tool_call');
+      const hasOutputText = Boolean(outputText || lastAssistantMessage);
+      currentTaskType = classifyTask(
+        iteration,
+        hasToolCalls,
+        previousCommandForRouting,
+        hasOutputText
+      );
+
       const userContent = encodeUserPayload(userPayload);
 
       const messagesForModel: OpenAIMessage[] = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userContent },
       ];
+      const llmSpec = modelRouter.getSpec(currentTaskType);
       budgetState.tokensUsed += estimateMessagesTokens(messagesForModel);
       budgetState.timeUsedMs = Date.now() - runStartMs;
 
@@ -775,8 +812,9 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         resultJson: {
           event: 'llm_request',
           iteration,
-          model,
-          fallbackModel,
+          taskType: currentTaskType,
+          model: llmSpec.model,
+          fallbackModel: llmSpec.fallbackModel ?? null,
           payload: userPayload,
         },
       });
@@ -790,15 +828,15 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
 
       let command: RunCommand | SpawnCommand | null = null;
       let lastResponseText = '';
-      const useStructuredOutputs = supportsStructuredOutputs(model);
+      const useStructuredOutputs = supportsStructuredOutputs(llmSpec.model);
 
       if (useStructuredOutputs) {
         // Use structured outputs for guaranteed valid JSON
         try {
           const parsedCommand = await callOpenAIStructuredWithFallback<Command>(
             apiKey,
-            model,
-            fallbackModel,
+            llmSpec.model,
+            llmSpec.fallbackModel ?? null,
             messagesForModel,
             {
               name: 'run_command',
@@ -806,7 +844,7 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
               strict: true,
               schema: commandJsonSchema,
             },
-            { temperature: 0 }
+            { temperature: llmSpec.temperature ?? 0 }
           );
           lastResponseText = JSON.stringify(parsedCommand);
           budgetState.tokensUsed += Math.max(1, Math.ceil(lastResponseText.length / 4));
@@ -851,10 +889,10 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
           logger.warn({ runId, iteration, error: err }, 'Structured output call failed, falling back');
           lastResponseText = await callOpenAIWithFallback(
             apiKey,
-            model,
-            fallbackModel,
+            llmSpec.model,
+            llmSpec.fallbackModel ?? null,
             messagesForModel,
-            { temperature: 0 }
+            { temperature: llmSpec.temperature ?? 0 }
           );
           budgetState.tokensUsed += Math.max(1, Math.ceil(lastResponseText.length / 4));
           await appendRunStep(db, {
@@ -882,10 +920,10 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         for (let attempt = 0; attempt <= config.runMaxJsonRetries; attempt += 1) {
           lastResponseText = await callOpenAIWithFallback(
             apiKey,
-            model,
-            fallbackModel,
+            llmSpec.model,
+            llmSpec.fallbackModel ?? null,
             messagesForModel,
-            { temperature: 0 }
+            { temperature: llmSpec.temperature ?? 0 }
           );
           budgetState.tokensUsed += Math.max(1, Math.ceil(lastResponseText.length / 4));
           if (config.runDebugPrompts) {
@@ -936,6 +974,11 @@ export async function processRun(job: Job<RunJob>, logger: Logger) {
         );
         return;
       }
+
+      previousCommandForRouting =
+        'category' in command && typeof command.category === 'string'
+          ? { type: command.type, category: command.category }
+          : { type: command.type };
 
       if (
         run.kind === 'coordinator' &&
